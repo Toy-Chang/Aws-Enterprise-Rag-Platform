@@ -1,4 +1,4 @@
-# ADR 0007 — AWS adapters behind the existing ports
+# ADR 0007 — AWS adapters and the ingestion queue behind the existing ports
 
 - **Status:** accepted
 - **Phase:** 7
@@ -10,7 +10,9 @@ Phases 1 to 6 built the platform against local adapters: documents on the filesy
 a lexical hashing embedder, and a brute-force in-memory index. Every one of them sits
 behind a port (`DocumentStorage`, `EmbeddingModel`, `VectorStore`) so that the AWS
 implementations could be added without changing a service. This phase adds them: S3 for
-documents, Bedrock for embeddings, OpenSearch for vectors.
+documents, Bedrock for embeddings, OpenSearch for vectors — and, for the first port that
+is not about data at rest, SQS for handing ingestion work to a consumer that is not the
+API process.
 
 The constraint that shapes everything here is that this repository has **no AWS
 account**. Whatever is written cannot be exercised against a real S3 bucket, a real
@@ -23,15 +25,23 @@ see them rather than left to be discovered.
 
 ### 1. One adapter per concern, selected by configuration in one module
 
-`app/adapters.py` holds `build_storage`, `build_embedder` and `build_vector_store`. The
-composition root calls them; nothing below it knows which implementation it was given.
-Each concern is selected independently, so a deployment can move documents to S3 while
-embeddings stay local, and the local stack keeps needing no AWS SDK and no credentials.
+`app/adapters.py` holds `build_storage`, `build_embedder`, `build_vector_store`,
+`build_document_queue` and `build_ingestion_service`. The composition root calls them;
+nothing below it knows which implementation it was given. Each concern is selected
+independently, so a deployment can move documents to S3 while embeddings stay local, and
+the local stack keeps needing no AWS SDK and no credentials.
 
 The alternative — a single "cloud mode" switch — was rejected because the three
 concerns have genuinely different migration stories. Moving vectors to OpenSearch is a
 bigger step than moving uploaded files to S3, and a deployment should be able to take
 them one at a time.
+
+The queue is the one concern with a **null implementation rather than a local one**:
+`NullDocumentQueue` accepts a message and drops it, because the local stack's consumer is
+the polling worker reading the database. That keeps the upload path free of a branch on
+which deployment it is running in, at the cost of a message that goes nowhere — which is
+only correct because the worker is guaranteed to find the document in the same database.
+The two must not be enabled together: see decision 10.
 
 ### 2. Every SDK import is deferred, and every adapter accepts an injected client
 
@@ -54,10 +64,10 @@ the S3 storage adapter needs the AWS SDK: install the 'aws' extra
 ### 3. A configuration that cannot work fails while the process starts
 
 `Settings` refuses `storage_backend="s3"` without `s3_bucket`, `vector_store_backend=
-"opensearch"` without `opensearch_endpoint`, and half a basic-auth pair. This was
-verified by running the service: with `APP_STORAGE_BACKEND=s3` and no bucket it exits
-with a validation error naming the missing setting, instead of starting and failing at
-the first upload.
+"opensearch"` without `opensearch_endpoint`, half a basic-auth pair, and `queue_backend=
+"sqs"` without `sqs_queue_url`. This was verified by running the service: with
+`APP_STORAGE_BACKEND=s3` and no bucket it exits with a validation error naming the
+missing setting, instead of starting and failing at the first upload.
 
 Half a pair is refused rather than tolerated because a username without a password
 would look configured and silently fall back to SigV4 signing, which fails later, with
@@ -137,20 +147,51 @@ This was verified against a real HTTP request: with the vector store pointed at 
 port, a query answers `502` with code `VECTOR_STORE_ERROR`, and ingestion records the
 document as `failed` with the reason attached rather than crashing the worker.
 
-### 10. What this phase does not contain
+### 10. A queued message is deleted only when the document reached a terminal state
+
+The consumer's rule comes from the document rather than from the run. A document that is
+`ready` or `failed` has had its outcome recorded, so the message did its job and the
+event source mapping deletes it. Everything else — no such document, a document still
+`processing` or `pending`, an unreadable body, a status that could not be read — leaves
+the message on the queue for another attempt, and the dead-letter queue eventually
+collects whatever never becomes valid.
+
+That is more than defensive coding. `IngestionService.run` records a failure instead of
+raising it, so "the run returned" does not mean "the work is done" — a run whose own
+failure could not be written leaves the document mid-ingestion. And a message can
+legitimately arrive before the transaction that created the document has committed.
+Both cases converge on a retry and neither converges on a delete, so nothing is deleted
+on a guess.
+
+This is also why the upload and reprocess endpoints **commit before they publish**. For an
+upload, publishing early is merely wasteful (the consumer finds no document, defers, and
+succeeds on the redelivery). For a reprocess it is a silent loss: the consumer would see
+the document's *previous* terminal state, treat the message as finished, and leave the new
+work unqueued. Committing first means everything a consumer can see is what the database
+actually holds — which is asserted in the HTTP tests by having the recording queue read
+the row through its own connection at publish time.
+
+The consumer is transport-agnostic. It is handed normalised messages, so the boto3 shape
+(`MessageId`, `ReceiptHandle`, `Body`) and the Lambda event shape (`messageId`,
+`receiptHandle`, `body`) are reconciled in one place rather than in the consumer — a
+difference that would otherwise be found in production.
+
+### 11. What this phase does not contain
 
 Stated here so it is not inferred from the directory listing:
 
-- **No queue and no consumer.** Ingestion is still driven by the polling worker reading
-  the database, which is correct for one process and is what the local stack uses. The
-  SQS queue and its consumer are the next piece of this phase.
 - **No authentication.** Every endpoint is open.
 - **No Terraform and no docker-compose.** The adapters can be configured by environment
-  variables; nothing yet creates the bucket, the domain, the index or the tasks.
+  variables; nothing yet creates the bucket, the domain, the index, the queue or the
+  tasks.
 - **No pgvector adapter.** The README describes the vector store as "OpenSearch or
   PostgreSQL with pgvector". Only OpenSearch exists. A second implementation of the same
   port would double a surface that cannot be verified here without adding a capability
   the platform does not have yet.
+- **No long-polling consumer for a container deployment.** Deletion is the Lambda event
+  source mapping's job, so there is no `receive_message` loop. A container deployment on
+  ECS would use the polling worker this repository already has, which is why no second
+  consumption path was written.
 
 ## Consequences
 
@@ -166,11 +207,20 @@ Stated here so it is not inferred from the directory listing:
   the stored vectors have the old length. Nothing migrates them.
 - The local stack is unchanged: no AWS SDK is imported, and the same tests pass with
   neither `boto3` nor `opensearchpy` installed in a deployment that does not use them.
+- A deployment that publishes to a queue must set `ingestion_worker_enabled=false`. Two
+  consumers of the same pending documents would ingest the same document twice: the work
+  is idempotent per document, so the visible damage is duplicated embedding spend and
+  duplicated log lines rather than duplicated rows, but it is waste that only a
+  configuration mistake produces.
+- Publishing is not transactional with the commit. A crash between them leaves a document
+  that was never queued and a caller that saw a `502` — recoverable through `reprocess`,
+  and bounded by the fact that the row is committed first. There is no outbox table; at
+  this scale the recovery path is a route that already exists.
 
 ## Alternatives considered
 
 - **One "cloud" switch for all three adapters.** Rejected; see decision 1.
-- **Implementing pgvector as well.** Deferred with the reasoning in decision 10.
+- **Implementing pgvector as well.** Deferred with the reasoning in decision 11.
 - **Fetching documents through `boto3`'s resource API.** Rejected: the client API is
   closer to the wire, which is what these tests are pinning down.
 - **Letting `min_score` be interpreted per backend.** Rejected: a threshold that means
@@ -183,13 +233,30 @@ Stated here so it is not inferred from the directory listing:
 - **A pgvector adapter instead of OpenSearch.** Rejected for now: OpenSearch is the
   managed index the rest of the design assumes, and pgvector would need its own
   extension, schema and migration story.
+- **Putting the document's content or chunking settings in the message.** Rejected: the
+  message would become a second source of truth that can disagree with the row, and the
+  consumer has to read the row anyway to record an outcome. Two identifiers and a version
+  is the whole payload.
+- **Deleting the message as soon as it is received.** Rejected: a crash mid-run would drop
+  the work silently. Deferring is chosen over deleting, and a batch-level retry is
+  reported through `ReportBatchItemFailures` rather than by failing the whole batch, so one
+  bad message does not re-run the good ones.
+- **A long-polling SQS consumer for containers.** Rejected for now: the existing database
+  poller already covers a container deployment, and a second consumption path would be a
+  second thing to keep correct. The event source mapping covers the Lambda path, including
+  deletion, which is what makes a polling loop unnecessary.
+- **SNS in front of the queue.** Rejected: there is one subscriber and no fan-out, so a
+  topic would add a hop and an IAM surface without adding a capability.
+- **An outbox table for publish-after-commit.** Deferred; see the last consequence. It is
+  the correct answer at a larger scale and is not this phase.
 
 ## Follow-up work
 
-- The SQS queue, its consumer and the Lambda entry point, so ingestion stops depending on
-  a process that is running.
 - Cognito authentication for the API and the UI.
-- Terraform for the bucket, the domain, the index, the database, the tasks and the IAM
-  roles, and a docker-compose stack for the whole platform.
+- Terraform for the bucket, the domain, the index, the database, the queue, the tasks and
+  the IAM roles, and a docker-compose stack for the whole platform.
+- A long-polling consumer for a container deployment, or a decision to keep using the
+  polling worker there.
 - One verification against a real account, recorded in the README, the moment one is
-  available.
+  available. The queue is the piece where this matters most: everything about it is
+  structurally tested and none of it has been send-and-received by SQS itself.

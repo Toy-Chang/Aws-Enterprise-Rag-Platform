@@ -8,8 +8,21 @@
  *   is what makes a user-visible error findable in the backend logs.
  * - A response that is not the documented envelope is still an error, not a crash. A proxy
  *   returning an HTML error page must not turn into a JSON parse exception.
+ *
+ * Authentication is attached here and nowhere else. When a session exists the request
+ * carries `Authorization: Bearer <access token>`; the token is refreshed *before* it is
+ * used if it is close to expiry, and a `401` — the token was revoked, rotated, or otherwise
+ * rejected — triggers one refresh-and-retry. If that fails the session is cleared and the
+ * user is sent to `/login`, because a page that can only ever return `401` is worse than a
+ * sign-in prompt. With authentication off (no Cognito configuration) none of this happens.
  */
 
+import { authEnabled } from '../auth/config'
+import {
+  getValidAccessToken,
+  renewAfterUnauthorized,
+  requestSignIn,
+} from '../auth/session-source'
 import type { ErrorEnvelope } from './types'
 
 /**
@@ -107,56 +120,87 @@ export interface RequestOptions {
  *
  * Resolves to `undefined` for an empty body (the delete endpoints answer `204`), which is
  * why the return type is generic and callers that expect nothing ask for `void`.
+ *
+ * At most two attempts are made: the first with whatever token is valid now, and — only
+ * after a `401` and only when authentication is on — a second after a refresh. The loop
+ * cannot run away, and a `403` is *not* retried: the token was accepted, the role was not.
  */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
-  if (options.json !== undefined) {
-    headers['Content-Type'] = 'application/json'
-  }
+  const authorized = authEnabled
+  let renewed = false
 
-  let response: Response
-  try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
-      method: options.method ?? 'GET',
-      headers,
-      body: options.json !== undefined ? JSON.stringify(options.json) : options.body,
-      ...(options.signal ? { signal: options.signal } : {}),
-    })
-  } catch (cause) {
-    // The request never completed: the backend is down, the network dropped, or the
-    // caller aborted. An abort is the caller's own doing, so it is re-thrown as-is.
-    if (cause instanceof DOMException && cause.name === 'AbortError') {
-      throw cause
+  for (;;) {
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (options.json !== undefined) {
+      headers['Content-Type'] = 'application/json'
     }
-    throw new ApiError('Could not reach the API.', {
-      status: 0,
-      code: 'NETWORK_ERROR',
-      details: cause instanceof Error ? cause.message : String(cause),
-    })
-  }
+    if (authorized) {
+      // A refresh happens inside this call when the stored token is at or near expiry, so
+      // the header below is never built from a token about to be rejected.
+      const token = await getValidAccessToken()
+      if (token) {
+        headers.Authorization = `Bearer ${token}`
+      }
+    }
 
-  const body = await readBody(response)
-
-  if (!response.ok) {
-    if (isErrorEnvelope(body)) {
-      throw new ApiError(body.error.message, {
-        status: response.status,
-        code: body.error.code,
-        details: body.error.details,
-        requestId: body.request_id,
+    let response: Response
+    try {
+      response = await fetch(`${API_BASE_URL}${path}`, {
+        method: options.method ?? 'GET',
+        headers,
+        body: options.json !== undefined ? JSON.stringify(options.json) : options.body,
+        ...(options.signal ? { signal: options.signal } : {}),
+      })
+    } catch (cause) {
+      // The request never completed: the backend is down, the network dropped, or the
+      // caller aborted. An abort is the caller's own doing, so it is re-thrown as-is.
+      if (cause instanceof DOMException && cause.name === 'AbortError') {
+        throw cause
+      }
+      throw new ApiError('Could not reach the API.', {
+        status: 0,
+        code: 'NETWORK_ERROR',
+        details: cause instanceof Error ? cause.message : String(cause),
       })
     }
-    // An error that did not come from the application: a proxy page, a truncated response,
-    // a server that crashed before the handler ran.
-    throw new ApiError(`The API returned ${response.status} in an unexpected format.`, {
-      status: response.status,
-      code: 'UNEXPECTED_RESPONSE',
-      details: typeof body === 'string' ? body.slice(0, 500) : body,
-      requestId: response.headers.get('X-Request-ID'),
-    })
-  }
 
-  return body as T
+    if (authorized && response.status === 401 && !renewed) {
+      renewed = true
+      // `renewAfterUnauthorized` clears the session itself when Cognito refuses, so a null
+      // answer is already a signed-out state.
+      const session = await renewAfterUnauthorized()
+      if (session) {
+        continue
+      }
+      requestSignIn()
+    }
+
+    const body = await readBody(response)
+
+    if (!response.ok) {
+      // A `401` here has already been through the refresh attempt above. Keeping the
+      // backend's own `UNAUTHENTICATED` envelope matters: it is the server's explanation,
+      // and the sign-in redirect is the client's reaction to it.
+      if (isErrorEnvelope(body)) {
+        throw new ApiError(body.error.message, {
+          status: response.status,
+          code: body.error.code,
+          details: body.error.details,
+          requestId: body.request_id,
+        })
+      }
+      // An error that did not come from the application: a proxy page, a truncated response,
+      // a server that crashed before the handler ran.
+      throw new ApiError(`The API returned ${response.status} in an unexpected format.`, {
+        status: response.status,
+        code: 'UNEXPECTED_RESPONSE',
+        details: typeof body === 'string' ? body.slice(0, 500) : body,
+        requestId: response.headers.get('X-Request-ID'),
+      })
+    }
+
+    return body as T
+  }
 }
 
 /** Field-level messages from a FastAPI validation failure, when the details carry them. */

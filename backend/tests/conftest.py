@@ -50,6 +50,14 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 
 
 @pytest.fixture
+def knowledge_base_id(client: TestClient) -> str:
+    """A knowledge base to work inside."""
+    response = client.post("/api/v1/knowledge-bases", json={"name": "Security"})
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+@pytest.fixture
 def storage_dir(settings: Settings) -> Path:
     """The document directory this test's storage adapter writes into."""
     return Path(settings.storage_dir)

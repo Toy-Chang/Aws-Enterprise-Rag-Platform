@@ -1,0 +1,215 @@
+# Container stack for this repository: PostgreSQL, the API and the SPA, plus an optional
+# single-node OpenSearch behind the `opensearch` profile.
+#
+# `docker compose up -d` needs no .env file: every value falls back to a safe local
+# default through ${VAR:-default}, and nothing here is a credential for anything but a
+# database that is only reachable on this machine. A real deployment has to change the
+# credentials, APP_ENVIRONMENT and the auth settings -- see docker/README.md, "Local-only
+# settings". Copy .env.docker.example to .env to override anything.
+#
+# The backend service is deliberately a single replica: the default vector index lives in
+# the process, and the ingestion worker is the only consumer of pending documents. Scale
+# out by turning on the opensearch profile and moving ingestion to a queue.
+
+name: aws-enterprise-rag-platform
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+      # A subdirectory of the mount point, so that a volume that ever gains other content
+      # cannot end up with non-cluster files inside PGDATA.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # No published port by default: the API reaches the database over the compose
+    # network, and a host port would expose it to everything else running on this machine.
+    # Uncomment this to inspect the schema with a local client:
+    # ports:
+    #   - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      # The credentials the API will use, so "healthy" means "this database will accept
+      # the API's connection", not merely "a server is listening".
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        # The schema is created at startup and there are no migrations, so the API must
+        # not race the database's first start.
+        condition: service_healthy
+    environment:
+      # --- service ---
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-local}
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8000"
+      # APP_RELOAD is deliberately absent: the application default is false, and a uvicorn
+      # reloader inside a container watches files that never change.
+      #
+      # --- persistence ---
+      APP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@postgres:5432/${POSTGRES_DB:-rag}
+      # --- document storage ---
+      APP_STORAGE_BACKEND: local
+      # A named volume, not a bind mount: uploaded documents then survive `docker compose
+      # up --build` without a host directory to create and permission by hand.
+      APP_STORAGE_DIR: /data/documents
+      # --- ingestion ---
+      # Single process, so this worker is the only consumer of pending documents. With
+      # APP_QUEUE_BACKEND=none an upload publishes nothing and the worker picks it up;
+      # with a queue the worker has to be off, because two consumers of the same pending
+      # documents would ingest one document twice.
+      APP_INGESTION_WORKER_ENABLED: "true"
+      APP_QUEUE_BACKEND: none
+      # --- local adapters as the defaults: no AWS credentials, no external service ---
+      APP_EMBEDDING_PROVIDER: local
+      APP_VECTOR_STORE_BACKEND: ${APP_VECTOR_STORE_BACKEND:-memory}
+      APP_GENERATION_PROVIDER: local
+      # --- retrieval policy: the threshold answers questions on the cosine scale and is
+      # bound to the embedding model, so it is exposed here only to be measured ---
+      APP_RETRIEVAL_TOP_K: ${APP_RETRIEVAL_TOP_K:-5}
+      APP_RETRIEVAL_MIN_SCORE: ${APP_RETRIEVAL_MIN_SCORE:-0.1}
+      # --- authentication ---
+      # `none` by default: the local stack is open, which is what makes it usable for a
+      # screenshot or a first run. Switching to `cognito` needs the three values below,
+      # and a browser that can reach both the API and the hosted UI. In this stack the
+      # frontend proxies /api, so the token travels to the same origin the app is served
+      # from, and APP_ENVIRONMENT stays `local` -- see docker/README.md, because the
+      # production environment refuses `none`.
+      APP_AUTH_BACKEND: ${APP_AUTH_BACKEND:-none}
+      APP_COGNITO_USER_POOL_ID: ${APP_COGNITO_USER_POOL_ID:-}
+      APP_COGNITO_CLIENT_ID: ${APP_COGNITO_CLIENT_ID:-}
+      APP_COGNITO_REGION: ${APP_COGNITO_REGION:-eu-west-1}
+      # --- observability ---
+      APP_LOG_FORMAT: ${APP_LOG_FORMAT:-json}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      # --- OpenSearch profile: `docker compose --profile opensearch up -d` -----------
+      # Which values go with the profile: APP_VECTOR_STORE_BACKEND=opensearch replaces
+      # the in-process index, and the client below finds the service on the compose
+      # network. The endpoint stays inert while the backend is `memory`, so the profile is
+      # enabled by one variable (APP_VECTOR_STORE_BACKEND=opensearch in .env). Turning on
+      # `opensearch` without an endpoint, or an endpoint without `opensearch`, is a
+      # configuration the application refuses at startup rather than a silent fallback.
+      #
+      # The local node disables its security plugin, but the adapter signs with SigV4
+      # unless a username and password are configured, so this pair has to be present or
+      # the client would look for AWS credentials and the process would exit. The local
+      # node ignores the header it produces: these are local-only placeholders, and a real
+      # cluster needs real credentials here.
+      APP_OPENSEARCH_ENDPOINT: ${APP_OPENSEARCH_ENDPOINT:-http://opensearch:9200}
+      APP_OPENSEARCH_INDEX: ${APP_OPENSEARCH_INDEX:-rag-chunks}
+      APP_OPENSEARCH_USERNAME: ${APP_OPENSEARCH_USERNAME:-admin}
+      APP_OPENSEARCH_PASSWORD: ${APP_OPENSEARCH_PASSWORD:-admin}
+      # The local node serves plain HTTP, so APP_OPENSEARCH_VERIFY_CERTS is not exercised
+      # here: the adapter derives use_ssl from the URL scheme. Leave it at its default for
+      # any HTTPS endpoint.
+      #
+      # Changing the vector store means re-ingesting: the index mapping is created with
+      # APP_EMBEDDING_DIMENSIONS, and vectors written for a different backend are not
+      # migrated (see docker/README.md, "Resetting data").
+    ports:
+      # Published so that curl, the OpenAPI page and a local script can reach the API
+      # directly as well as through the frontend's proxy.
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - documents:/data/documents
+    healthcheck:
+      # Readiness rather than liveness: it fails while the database check fails, which is
+      # the condition that makes this service useless to the frontend.
+      #
+      # The probe answers 200 even when a dependency is degraded (the degraded state is in
+      # the body), so the healthcheck reads the reported status instead of the HTTP code.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json, urllib.request, sys; body = json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)); sys.exit(0 if body.get('status') == 'ok' else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      # The repository root, not frontend/: the runtime stage copies docker/nginx.conf as
+      # well as the sources, and the Dockerfile copies those paths explicitly so no other
+      # part of the context reaches the image.
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # Empty by default: the built UI calls the same origin it is served from, and
+        # nginx forwards /api to the backend, so the browser never needs CORS. Set this
+        # only to point the assets at another origin, without a trailing slash.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    depends_on:
+      backend:
+        # Not required to start (nginx proxies per request), but this makes `up -d` end
+        # with a stack that can answer a question instead of a UI whose first call fails.
+        condition: service_healthy
+    ports:
+      # 8080 rather than 80 on the host: 80 is a port other local software commonly wants,
+      # and the URL stays explicit. Inside the container nginx listens on 80.
+      - "${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Optional, and not started by `docker compose up -d`: a single node is a convenience
+  # for exercising the OpenSearch k-NN adapter against something real, not a deployment
+  # shape (no TLS, no authentication, one node, no backups).
+  opensearch:
+    profiles: ["opensearch"]
+    image: opensearchproject/opensearch:2.19.1
+    environment:
+      discovery.type: single-node
+      # Both plugins are off, which is what makes the node reachable over plain HTTP with
+      # no certificates -- the reason this service must not be exposed to any network
+      # other than the compose one.
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      # A small heap: this node indexes a handful of documents, and the default heap size
+      # is derived from the host's memory rather than from what the container needs.
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      bootstrap.memory_lock: "true"
+    ulimits:
+      # What the memory lock above needs, plus the file descriptor count the node assumes.
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  # Database contents.
+  postgres_data:
+  # Uploaded documents written by the local storage adapter (APP_STORAGE_DIR).
+  documents:
+  # Only used by the opensearch profile.
+  opensearch_data:

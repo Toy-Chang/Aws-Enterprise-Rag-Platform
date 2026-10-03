@@ -11,6 +11,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 
 import { api } from '../api/endpoints'
 import { useAsync } from '../lib/useAsync'
+import { SignedInAs } from './SignedInAs'
 
 function ApiStatus(): ReactNode {
   const health = useAsync((signal) => api.liveness(signal), [])
@@ -44,7 +45,10 @@ export function Layout(): ReactNode {
           <span className="app__title">AWS Enterprise RAG Platform</span>
           <span className="app__subtitle">Answers built only from your own documents</span>
         </div>
-        <ApiStatus />
+        <div className="app__status">
+          <SignedInAs />
+          <ApiStatus />
+        </div>
       </header>
 
       <nav className="nav" aria-label="Sections">

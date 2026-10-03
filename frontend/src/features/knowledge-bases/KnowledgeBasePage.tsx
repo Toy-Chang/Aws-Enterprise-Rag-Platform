@@ -14,6 +14,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ApiError, asApiError } from '../../api/client'
 import { api } from '../../api/endpoints'
 import type { DocumentMetadata, DocumentStatus } from '../../api/types'
+import { useCan } from '../../auth/AuthContext'
 import { ConfirmButton } from '../../components/ConfirmButton'
 import { EmptyState, ErrorState, Loading } from '../../components/states'
 import { formatBytes, formatCount, formatTimestamp } from '../../lib/format'
@@ -39,6 +40,9 @@ type Tab = 'documents' | 'ask'
 
 export function KnowledgeBasePage(): ReactNode {
   const { knowledgeBaseId = '' } = useParams()
+  const canUpload = useCan('document:upload')
+  const canReprocess = useCan('document:reprocess')
+  const canDelete = useCan('document:delete')
   const knowledgeBase = useAsync(
     (signal) => api.getKnowledgeBase(knowledgeBaseId, signal),
     [knowledgeBaseId],
@@ -177,23 +181,33 @@ export function KnowledgeBasePage(): ReactNode {
               appears as <code>pending</code> and becomes <code>ready</code> when its passages
               are indexed.
             </p>
-            <form className="row" onSubmit={(event) => void upload(event)}>
-              <div className="field">
-                <label htmlFor="document-file">File</label>
-                <input
-                  id="document-file"
-                  ref={fileInput}
-                  type="file"
-                  accept=".pdf,.md,.markdown,.txt,.text"
-                  onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                    setFile(event.target.files?.[0] ?? null)
-                  }}
-                />
-              </div>
-              <button type="submit" className="button button--primary" disabled={!file || uploading}>
-                {uploading ? 'Uploading…' : 'Upload'}
-              </button>
-            </form>
+            {canUpload ? (
+              <form className="row" onSubmit={(event) => void upload(event)}>
+                <div className="field">
+                  <label htmlFor="document-file">File</label>
+                  <input
+                    id="document-file"
+                    ref={fileInput}
+                    type="file"
+                    accept=".pdf,.md,.markdown,.txt,.text"
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                      setFile(event.target.files?.[0] ?? null)
+                    }}
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="button button--primary"
+                  disabled={!file || uploading}
+                >
+                  {uploading ? 'Uploading…' : 'Upload'}
+                </button>
+              </form>
+            ) : (
+              <p className="card__hint">
+                Uploading needs the <code>editor</code> role.
+              </p>
+            )}
             {uploadError ? <ErrorState error={uploadError} /> : null}
           </div>
 
@@ -264,18 +278,22 @@ export function KnowledgeBasePage(): ReactNode {
                             >
                               {expandedDocumentId === document.id ? 'Hide' : 'Passages'}
                             </button>
-                            <button
-                              type="button"
-                              className="button button--small"
-                              onClick={() => void reprocess(document)}
-                            >
-                              Reprocess
-                            </button>
-                            <ConfirmButton
-                              label="Delete"
-                              confirmLabel="Delete it"
-                              onConfirm={() => remove(document)}
-                            />
+                            {canReprocess ? (
+                              <button
+                                type="button"
+                                className="button button--small"
+                                onClick={() => void reprocess(document)}
+                              >
+                                Reprocess
+                              </button>
+                            ) : null}
+                            {canDelete ? (
+                              <ConfirmButton
+                                label="Delete"
+                                confirmLabel="Delete it"
+                                onConfirm={() => remove(document)}
+                              />
+                            ) : null}
                           </div>
                         </td>
                       </tr>

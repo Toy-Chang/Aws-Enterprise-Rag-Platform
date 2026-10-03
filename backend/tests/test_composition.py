@@ -8,12 +8,16 @@ import pytest
 from pydantic import ValidationError
 
 from app.aws.bedrock_embeddings import BedrockEmbeddingModel
+from app.aws.cognito_auth import CognitoTokenVerifier
 from app.aws.opensearch_vector_store import OpenSearchVectorStore
 from app.aws.s3_storage import S3DocumentStorage
+from app.aws.sqs_queue import SqsDocumentQueue
 from app.core.config import Settings
 from app.main import create_app
 from app.rag import HashingEmbeddingModel, InMemoryVectorStore
 from app.repositories.local_fs_storage import LocalFileSystemStorage
+from app.repositories.queue import NullDocumentQueue
+from app.security.auth import AnonymousTokenVerifier
 
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -78,3 +82,55 @@ def test_a_half_configured_aws_adapter_fails_while_the_process_starts(tmp_path: 
 
     with pytest.raises(ValidationError, match="opensearch_endpoint is required"):
         create_app(_settings(tmp_path, vector_store_backend="opensearch"))
+
+    with pytest.raises(ValidationError, match="sqs_queue_url is required"):
+        create_app(_settings(tmp_path, queue_backend="sqs"))
+
+    with pytest.raises(ValidationError, match="cognito_user_pool_id is required"):
+        create_app(_settings(tmp_path, auth_backend="cognito"))
+
+
+def test_the_local_stack_has_no_queue(tmp_path: Path) -> None:
+    # The worker polls the database, so publishing has to be a harmless no-op rather than
+    # an error the upload path would have to know about.
+    app = create_app(_settings(tmp_path))
+
+    assert isinstance(app.state.document_queue, NullDocumentQueue)
+
+
+def test_the_local_stack_trusts_every_request_as_anonymous(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path))
+
+    assert isinstance(app.state.token_verifier, AnonymousTokenVerifier)
+    principal = app.state.token_verifier.verify(None)
+    assert principal.authenticated is False
+
+
+def test_cognito_is_selected_with_its_pool(tmp_path: Path) -> None:
+    app = create_app(
+        _settings(
+            tmp_path,
+            auth_backend="cognito",
+            cognito_user_pool_id="eu-west-1_TESTPOOL",
+            cognito_client_id="client-id",
+            cognito_region="eu-west-1",
+        )
+    )
+
+    verifier = app.state.token_verifier
+    assert isinstance(verifier, CognitoTokenVerifier)
+    assert verifier.issuer == "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_TESTPOOL"
+
+
+def test_sqs_is_selected_with_its_queue_url(tmp_path: Path) -> None:
+    app = create_app(
+        _settings(
+            tmp_path,
+            queue_backend="sqs",
+            sqs_queue_url="https://sqs.eu-west-1.amazonaws.com/1/ingestion",
+            sqs_region="eu-west-1",
+        )
+    )
+
+    assert isinstance(app.state.document_queue, SqsDocumentQueue)
+    assert app.state.document_queue.queue_url == "https://sqs.eu-west-1.amazonaws.com/1/ingestion"

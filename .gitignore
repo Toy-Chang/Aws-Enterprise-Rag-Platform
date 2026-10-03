@@ -17,6 +17,8 @@ dist/
 # Never commit real configuration or credentials.
 .env
 .env.*
+# ...except the compose template, which carries no secret and is meant to be committed.
+!.env.docker.example
 !.env.example
 *.pem
 *.key

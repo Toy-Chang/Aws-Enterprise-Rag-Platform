@@ -11,16 +11,24 @@ of the optional setting without silently passing ``None`` into an adapter.
 
 from __future__ import annotations
 
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.aws.bedrock_embeddings import BedrockEmbeddingModel
+from app.aws.cognito_auth import CognitoTokenVerifier
 from app.aws.opensearch_vector_store import OpenSearchVectorStore
 from app.aws.s3_storage import S3DocumentStorage
+from app.aws.sqs_queue import SqsDocumentQueue
 from app.core.config import Settings
+from app.core.metrics import MetricsRegistry
 from app.rag.embeddings import EmbeddingModel
 from app.rag.hashing_embeddings import HashingEmbeddingModel
 from app.rag.in_memory_vector_store import InMemoryVectorStore
 from app.rag.vector_store import VectorStore
 from app.repositories.local_fs_storage import LocalFileSystemStorage
+from app.repositories.queue import DocumentQueue, NullDocumentQueue
 from app.repositories.storage import DocumentStorage
+from app.security.auth import AnonymousTokenVerifier, TokenVerifier
+from app.services.ingestion import IngestionService
 
 
 def build_storage(settings: Settings) -> DocumentStorage:
@@ -69,3 +77,63 @@ def build_vector_store(settings: Settings) -> VectorStore:
             serverless=settings.opensearch_serverless,
         )
     return InMemoryVectorStore(settings.embedding_dimensions)
+
+
+def build_document_queue(settings: Settings) -> DocumentQueue:
+    """Return the queue that ingestion work is published to.
+
+    The default is no queue at all: the ingestion worker polls the database for pending
+    documents, so an upload is picked up without anything being published. A deployment
+    that publishes to a queue turns the worker off, because two consumers of the same
+    pending documents would run the same document twice.
+    """
+    if settings.queue_backend == "sqs":
+        queue_url = settings.sqs_queue_url
+        if queue_url is None:  # pragma: no cover - Settings refuses this combination
+            raise ValueError("sqs_queue_url is required when queue_backend is 'sqs'")
+        return SqsDocumentQueue(queue_url, region=settings.sqs_region)
+    return NullDocumentQueue()
+
+
+def build_token_verifier(settings: Settings) -> TokenVerifier:
+    """Return the token verifier the configuration asks for.
+
+    The default trusts every request as an unauthenticated, fully privileged principal,
+    which is what keeps the local and container stacks usable without an identity
+    provider. ``Settings`` refuses that backend in production, so the permissive default
+    cannot reach a deployment.
+    """
+    if settings.auth_backend == "cognito":
+        return CognitoTokenVerifier(
+            user_pool_id=settings.cognito_user_pool_id,
+            client_id=settings.cognito_client_id,
+            region=settings.cognito_region,
+            issuer=settings.cognito_issuer,
+            cache_seconds=settings.cognito_jwks_cache_seconds,
+            leeway_seconds=settings.auth_leeway_seconds,
+        )
+    return AnonymousTokenVerifier()
+
+
+def build_ingestion_service(
+    settings: Settings,
+    *,
+    session_factory: sessionmaker[Session],
+    storage: DocumentStorage,
+    embedder: EmbeddingModel,
+    vector_store: VectorStore,
+    metrics: MetricsRegistry,
+) -> IngestionService:
+    """Assemble the ingestion service from the adapters it runs against.
+
+    The API process and the queue consumer both call this, so a document is ingested the
+    same way whether a worker found it or a message asked for it.
+    """
+    return IngestionService(
+        session_factory=session_factory,
+        storage=storage,
+        embedder=embedder,
+        vector_store=vector_store,
+        settings=settings,
+        metrics=metrics,
+    )

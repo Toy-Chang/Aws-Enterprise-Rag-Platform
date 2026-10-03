@@ -116,6 +116,31 @@ a {
   font-size: 0.85rem;
 }
 
+/* The header's right-hand side: who is signed in, and whether the API answers. */
+
+.app__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.session {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.session__who {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.session__who strong {
+  color: var(--text);
+}
+
 .nav {
   display: flex;
   gap: 0.25rem;

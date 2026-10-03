@@ -1,0 +1,37 @@
+# The build context is backend/, so everything below is about keeping the local
+# development state and the artefacts of a previous build out of the image. The image
+# installs the package from pyproject.toml and then copies app/ explicitly, so nothing
+# here changes what the image contains -- it only changes what is sent to the daemon.
+
+# Virtualenv, caches and build output of a local run.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Tests are run from the checkout, not from the image (the image is a runtime, and the
+# suite needs no part of it).
+tests/
+
+# Local configuration and local application data. `.env` can hold credentials and the
+# SQLite database and stored documents belong to a host process, not to this image.
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# The Dockerfile itself is only read by the builder.
+Dockerfile
+.dockerignore

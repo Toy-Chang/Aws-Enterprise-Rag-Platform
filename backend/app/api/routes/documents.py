@@ -5,9 +5,18 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, File, Response, UploadFile, status
+from sqlalchemy.orm import Session
 
-from app.api.deps import SessionDep, SettingsDep, StorageDep, VectorStoreDep
+from app.api.deps import (
+    DocumentQueueDep,
+    EditorDep,
+    SessionDep,
+    SettingsDep,
+    StorageDep,
+    VectorStoreDep,
+)
 from app.core.errors import PayloadTooLargeError
+from app.repositories.queue import DocumentQueue, IngestionMessage
 from app.schemas.chunk import ChunkRead
 from app.schemas.document import DocumentRead
 from app.services.documents import DocumentService
@@ -15,6 +24,25 @@ from app.services.documents import DocumentService
 router = APIRouter(prefix="/knowledge-bases/{knowledge_base_id}/documents", tags=["documents"])
 
 _READ_CHUNK_BYTES = 1024 * 1024
+
+
+def _publish_ingestion_work(
+    session: Session,
+    queue: DocumentQueue,
+    *,
+    knowledge_base_id: str,
+    document_id: str,
+) -> None:
+    """Publish the document for ingestion, after committing the row it refers to.
+
+    The commit comes first on purpose. Publishing inside the request's transaction lets a
+    consumer receive the message before the document is visible, and for a reprocess that
+    is not self-correcting: the consumer would see the document's *previous* terminal
+    state and treat the message as done, leaving the new work unqueued. Committing first
+    means anything a consumer sees is what the database actually holds.
+    """
+    session.commit()
+    queue.enqueue(IngestionMessage(knowledge_base_id=knowledge_base_id, document_id=document_id))
 
 
 @router.post(
@@ -28,7 +56,9 @@ def upload_document(
     session: SessionDep,
     storage: StorageDep,
     vector_store: VectorStoreDep,
+    queue: DocumentQueueDep,
     settings: SettingsDep,
+    _editor: EditorDep,
 ) -> DocumentRead:
     """Store a document in a knowledge base and queue it for ingestion.
 
@@ -36,6 +66,11 @@ def upload_document(
     embedding take far longer than a client should wait. The ingestion worker picks
     it up and settles it at ``ready`` or ``failed``; polling this endpoint is how a
     caller watches that happen, and ``error_message`` carries the reason on failure.
+
+    A deployment that publishes to a queue can fail here: the work is not queued, so
+    the request answers ``502`` and the document stays ``pending`` until it is
+    reprocessed. That is reported rather than swallowed, because a caller told the
+    upload succeeded would have no way to learn that nothing will ingest it.
     """
     content = _read_within_limit(file, settings.max_upload_size_bytes)
     document = DocumentService(session, storage, vector_store).upload(
@@ -43,6 +78,9 @@ def upload_document(
         filename=file.filename,
         content_type=file.content_type,
         content=content,
+    )
+    _publish_ingestion_work(
+        session, queue, knowledge_base_id=knowledge_base_id, document_id=document.id
     )
     return DocumentRead.model_validate(document)
 
@@ -104,6 +142,8 @@ def reprocess_document(
     session: SessionDep,
     storage: StorageDep,
     vector_store: VectorStoreDep,
+    queue: DocumentQueueDep,
+    _editor: EditorDep,
 ) -> DocumentRead:
     """Discard the document's indexed passages and queue it for ingestion again.
 
@@ -113,6 +153,9 @@ def reprocess_document(
     """
     document = DocumentService(session, storage, vector_store).reprocess(
         knowledge_base_id, document_id
+    )
+    _publish_ingestion_work(
+        session, queue, knowledge_base_id=knowledge_base_id, document_id=document.id
     )
     return DocumentRead.model_validate(document)
 
@@ -128,6 +171,7 @@ def delete_document(
     session: SessionDep,
     storage: StorageDep,
     vector_store: VectorStoreDep,
+    _editor: EditorDep,
 ) -> Response:
     """Delete a document, its indexed passages and the content stored for it."""
     DocumentService(session, storage, vector_store).delete(knowledge_base_id, document_id)

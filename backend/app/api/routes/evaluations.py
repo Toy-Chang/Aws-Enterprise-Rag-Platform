@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.deps import (
+    AdminDep,
     AnswerModelDep,
     EmbedderDep,
     IngestionDep,
@@ -33,6 +34,7 @@ def run_evaluation(
     answer_model: AnswerModelDep,
     ingestion: IngestionDep,
     metrics: MetricsDep,
+    _admin: AdminDep,
 ) -> EvaluationResponse:
     """Ingest a corpus, ask every question of the dataset, and score what came back.
 

@@ -110,6 +110,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         code=exc.code,
         message=exc.message,
         details=exc.details,
+        headers=exc.headers,
     )
 
 

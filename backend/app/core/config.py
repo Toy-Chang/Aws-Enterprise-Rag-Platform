@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     # Persistence.
     database_url: str = "sqlite:///./rag.db"
 
+    # Set when the process has to fetch its connection URL from Secrets Manager itself.
+    # An ECS task definition resolves ``secrets.valueFrom`` before the container starts, so
+    # the API never needs this; a Lambda has no equivalent, so the ingestion consumer is
+    # configured with the secret's ARN and reads the URL out of it at cold start. The
+    # password therefore stays out of a function configuration, which anyone with
+    # ``lambda:GetFunctionConfiguration`` can read.
+    database_secret_arn: str | None = None
+
     # Document storage (local adapter).
     storage_dir: str = "./data"
     max_upload_size_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
@@ -114,6 +122,48 @@ class Settings(BaseSettings):
     # different service name, so the deployment has to say which kind it is.
     opensearch_serverless: bool = False
 
+    # Ingestion work is handed to a queue, or not. The local stack has none: the worker
+    # polls the database for pending documents. A deployment with more than one task
+    # needs one, because two pollers would claim the same document; a deployment that
+    # publishes has to turn ``ingestion_worker_enabled`` off for the same reason.
+    queue_backend: Literal["none", "sqs"] = "none"
+    sqs_queue_url: str | None = None
+    sqs_region: str = "us-east-1"
+
+    # Authentication. ``none`` leaves every endpoint open, which is what the local stack
+    # and the container stack use; ``cognito`` verifies a bearer token against a user
+    # pool and authorizes the caller by the groups the token carries. The production
+    # environment refuses ``none``: see the validator below.
+    auth_backend: Literal["none", "cognito"] = "none"
+    cognito_user_pool_id: str | None = None
+    cognito_client_id: str | None = None
+    cognito_region: str = "us-east-1"
+    # The issuer is derived from the pool and the region. This overrides it, which a
+    # non-standard domain needs and a test finds convenient.
+    cognito_issuer: str | None = None
+    # How long the pool's key document is reused before it is fetched again, and how much
+    # clock skew between this service and the pool is tolerated.
+    cognito_jwks_cache_seconds: int = Field(default=3600, ge=0)
+    auth_leeway_seconds: int = Field(default=60, ge=0)
+
+    @property
+    def authentication_enabled(self) -> bool:
+        """Whether requests have to carry a verifiable token."""
+        return self.auth_backend != "none"
+
+    @property
+    def cognito_issuer_url(self) -> str | None:
+        """The issuer an accepted token has to carry, or ``None`` when auth is off."""
+        if self.auth_backend != "cognito":
+            return None
+        configured = (self.cognito_issuer or "").strip()
+        if configured:
+            return configured
+        return (
+            f"https://cognito-idp.{self.cognito_region}.amazonaws.com/"
+            f"{(self.cognito_user_pool_id or '').strip()}"
+        )
+
     @property
     def opensearch_basic_auth(self) -> tuple[str, str] | None:
         """The basic-auth pair, or ``None`` when requests should be signed with SigV4."""
@@ -154,6 +204,33 @@ class Settings(BaseSettings):
                     "opensearch_username and opensearch_password have to be set together: "
                     "with neither of them, requests are signed with SigV4"
                 )
+
+        if self.queue_backend == "sqs" and not (self.sqs_queue_url or "").strip():
+            raise ValueError("sqs_queue_url is required when queue_backend is 'sqs'")
+        return self
+
+    @model_validator(mode="after")
+    def _check_authentication(self) -> Settings:
+        """Refuse an authentication configuration that cannot protect the API."""
+        if self.auth_backend == "cognito":
+            if (
+                not (self.cognito_user_pool_id or "").strip()
+                and not (self.cognito_issuer or "").strip()
+            ):
+                raise ValueError(
+                    "cognito_user_pool_id is required when auth_backend is 'cognito' "
+                    "(or set cognito_issuer to the pool's issuer URL)"
+                )
+            if not (self.cognito_client_id or "").strip():
+                raise ValueError("cognito_client_id is required when auth_backend is 'cognito'")
+
+        # An open API in production is not a configuration to be warned about: it is the
+        # difference between a platform and an exposed corpus.
+        if self.auth_backend == "none" and self.environment == "production":
+            raise ValueError(
+                "auth_backend 'none' is refused in the production environment: "
+                "set auth_backend=cognito with cognito_user_pool_id and cognito_client_id"
+            )
         return self
 
 

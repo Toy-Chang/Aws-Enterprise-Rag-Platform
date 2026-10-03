@@ -1,0 +1,26 @@
+# The frontend image is built with the repository root as its context, because its runtime
+# stage also copies docker/nginx.conf. Without this file the whole working tree -- the
+# backend virtualenv, the frontend node_modules, build output and the git history -- is
+# sent to the daemon on every build.
+.git
+.github
+.vscode
+.venv
+**/.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+**/*.db
+**/*.sqlite3
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+.DS_Store
+docs
+infrastructure
+*.md
+!docker/nginx.conf

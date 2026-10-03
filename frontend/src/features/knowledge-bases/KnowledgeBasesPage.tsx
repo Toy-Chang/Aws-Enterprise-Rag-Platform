@@ -4,6 +4,12 @@
  * Creation and deletion are the only writes here, and both surface the backend's own error
  * verbatim — a duplicate name is a `409 CONFLICT` with the name in `details`, and hiding
  * that behind "could not create" would make the operator guess.
+ *
+ * The two writes are also the two role-gated actions: an editor may create, an admin may
+ * delete. The controls are hidden when the role is absent so the UI does not offer a button
+ * whose only possible outcome is `403 FORBIDDEN`. A viewer still sees the list, because
+ * reading needs no role. With authentication off every check passes and the page is what it
+ * always was.
  */
 
 import { useState } from 'react'
@@ -13,12 +19,15 @@ import { Link } from 'react-router-dom'
 import { ApiError, asApiError } from '../../api/client'
 import { api } from '../../api/endpoints'
 import type { KnowledgeBase } from '../../api/types'
+import { useCan } from '../../auth/AuthContext'
 import { ConfirmButton } from '../../components/ConfirmButton'
 import { EmptyState, ErrorState, Loading } from '../../components/states'
 import { formatCount, formatTimestamp } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 
 export function KnowledgeBasesPage(): ReactNode {
+  const canCreate = useCan('knowledge-base:create')
+  const canDelete = useCan('knowledge-base:delete')
   const list = useAsync((signal) => api.listKnowledgeBases(signal), [])
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -65,53 +74,59 @@ export function KnowledgeBasesPage(): ReactNode {
         are built only from the knowledge base you ask.
       </p>
 
-      <div className="card">
-        <div className="card__header">
-          <h2>Create</h2>
+      {canCreate ? (
+        <div className="card">
+          <div className="card__header">
+            <h2>Create</h2>
+          </div>
+          <form className="row" onSubmit={(event) => void create(event)}>
+            <div className="field">
+              <label htmlFor="kb-name">Name</label>
+              <input
+                id="kb-name"
+                value={name}
+                maxLength={120}
+                required
+                placeholder="Platform runbooks"
+                onChange={(event) => {
+                  setName(event.target.value)
+                }}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="kb-description">Description (optional)</label>
+              <input
+                id="kb-description"
+                value={description}
+                maxLength={1000}
+                placeholder="Operational documents used by the on-call rotation"
+                onChange={(event) => {
+                  setDescription(event.target.value)
+                }}
+              />
+            </div>
+            <button type="submit" className="button button--primary" disabled={creating}>
+              {creating ? 'Creating…' : 'Create knowledge base'}
+            </button>
+          </form>
+          {createError ? (
+            <ErrorState
+              error={createError}
+              onRetry={
+                createError.code === 'CONFLICT'
+                  ? () => {
+                      setCreateError(null)
+                    }
+                  : undefined
+              }
+            />
+          ) : null}
         </div>
-        <form className="row" onSubmit={(event) => void create(event)}>
-          <div className="field">
-            <label htmlFor="kb-name">Name</label>
-            <input
-              id="kb-name"
-              value={name}
-              maxLength={120}
-              required
-              placeholder="Platform runbooks"
-              onChange={(event) => {
-                setName(event.target.value)
-              }}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="kb-description">Description (optional)</label>
-            <input
-              id="kb-description"
-              value={description}
-              maxLength={1000}
-              placeholder="Operational documents used by the on-call rotation"
-              onChange={(event) => {
-                setDescription(event.target.value)
-              }}
-            />
-          </div>
-          <button type="submit" className="button button--primary" disabled={creating}>
-            {creating ? 'Creating…' : 'Create knowledge base'}
-          </button>
-        </form>
-        {createError ? (
-          <ErrorState
-            error={createError}
-            onRetry={
-              createError.code === 'CONFLICT'
-                ? () => {
-                    setCreateError(null)
-                  }
-                : undefined
-            }
-          />
-        ) : null}
-      </div>
+      ) : (
+        <p className="card__hint">
+          Creating a knowledge base needs the <code>editor</code> role.
+        </p>
+      )}
 
       <div className="card">
         <div className="card__header">
@@ -154,11 +169,15 @@ export function KnowledgeBasesPage(): ReactNode {
                     <td>{knowledgeBase.description ?? '—'}</td>
                     <td>{formatTimestamp(knowledgeBase.created_at)}</td>
                     <td>
-                      <ConfirmButton
-                        label="Delete"
-                        confirmLabel="Delete it"
-                        onConfirm={() => remove(knowledgeBase)}
-                      />
+                      {canDelete ? (
+                        <ConfirmButton
+                          label="Delete"
+                          confirmLabel="Delete it"
+                          onConfirm={() => remove(knowledgeBase)}
+                        />
+                      ) : (
+                        <span className="card__hint">—</span>
+                      )}
                     </td>
                   </tr>
                 ))}

@@ -7,7 +7,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.adapters import build_embedder, build_storage, build_vector_store
+from app.adapters import (
+    build_document_queue,
+    build_embedder,
+    build_ingestion_service,
+    build_storage,
+    build_token_verifier,
+    build_vector_store,
+)
 from app.api.errors import register_exception_handlers
 from app.api.middleware import RequestContextMiddleware
 from app.api.router import api_router
@@ -22,7 +29,7 @@ from app.rag import (
     ExtractiveAnswerModel,
     LexicalOverlapReranker,
 )
-from app.services.ingestion import IngestionService, rebuild_vector_index
+from app.services.ingestion import rebuild_vector_index
 from app.services.worker import IngestionWorker
 
 logger = get_logger(__name__)
@@ -104,12 +111,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.storage = build_storage(resolved)
     app.state.embedder = build_embedder(resolved)
     app.state.vector_store = build_vector_store(resolved)
-    app.state.ingestion = IngestionService(
+    app.state.document_queue = build_document_queue(resolved)
+    app.state.token_verifier = build_token_verifier(resolved)
+    app.state.ingestion = build_ingestion_service(
+        resolved,
         session_factory=app.state.session_factory,
         storage=app.state.storage,
         embedder=app.state.embedder,
         vector_store=app.state.vector_store,
-        settings=resolved,
         metrics=app.state.metrics,
     )
     app.state.ingestion_worker = IngestionWorker(

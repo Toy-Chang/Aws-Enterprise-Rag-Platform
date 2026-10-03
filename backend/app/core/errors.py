@@ -21,14 +21,23 @@ class AppError(Exception):
     status_code: int = 500
     code: str = "INTERNAL_ERROR"
     message: str = "An unexpected error occurred."
+    #: Response headers this failure has to carry. A 401 without
+    #: ``WWW-Authenticate`` is not a valid challenge, so a subclass can demand one.
+    headers: dict[str, str] | None = None
 
     def __init__(
-        self, message: str | None = None, *, details: dict[str, Any] | None = None
+        self,
+        message: str | None = None,
+        *,
+        details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message or self.message)
         if message is not None:
             self.message = message
         self.details: dict[str, Any] = dict(details or {})
+        declared = headers if headers is not None else (type(self).headers or {})
+        self.headers: dict[str, str] = dict(declared)
 
 
 class BadRequestError(AppError):

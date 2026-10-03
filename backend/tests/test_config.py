@@ -27,6 +27,11 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("APP_PORT", "9001")
     monkeypatch.setenv("APP_LOG_FORMAT", "console")
     monkeypatch.setenv("APP_RELOAD", "true")
+    # Production refuses the permissive default, so a production-like environment has to
+    # bring an identity provider with it.
+    monkeypatch.setenv("APP_AUTH_BACKEND", "cognito")
+    monkeypatch.setenv("APP_COGNITO_USER_POOL_ID", "eu-west-1_abc123")
+    monkeypatch.setenv("APP_COGNITO_CLIENT_ID", "1a2b3c4d5e6f7g8h9i0j")
 
     settings = Settings(_env_file=None)
 
@@ -34,6 +39,7 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     assert settings.port == 9001
     assert settings.log_format == "console"
     assert settings.reload is True
+    assert settings.auth_backend == "cognito"
 
 
 def test_unknown_environment_variables_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,6 +178,9 @@ def test_aws_adapter_defaults_keep_the_platform_local() -> None:
     assert settings.opensearch_verify_certs is True
     assert settings.opensearch_serverless is False
     assert settings.opensearch_basic_auth is None
+    assert settings.queue_backend == "none"
+    assert settings.sqs_queue_url is None
+    assert settings.sqs_region == "us-east-1"
 
 
 @pytest.mark.parametrize("bucket", ["", "   "])
@@ -248,8 +257,97 @@ def test_the_opensearch_password_is_not_readable_from_a_representation() -> None
         ("storage_backend", "gcs"),
         ("embedding_provider", "openai"),
         ("vector_store_backend", "pinecone"),
+        ("queue_backend", "kafka"),
     ],
 )
 def test_an_unknown_adapter_is_rejected(field: str, value: str) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{field: value})
+
+
+@pytest.mark.parametrize("queue_url", [None, "", "   "])
+def test_sqs_without_a_queue_url_is_rejected(queue_url: str | None) -> None:
+    with pytest.raises(ValidationError, match="sqs_queue_url is required"):
+        Settings(_env_file=None, queue_backend="sqs", sqs_queue_url=queue_url)
+
+
+def test_authentication_is_off_by_default() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.auth_backend == "none"
+    assert settings.authentication_enabled is False
+    assert settings.cognito_issuer_url is None
+    assert settings.cognito_user_pool_id is None
+    assert settings.cognito_client_id is None
+    assert settings.cognito_region == "us-east-1"
+    assert settings.cognito_issuer is None
+    assert settings.cognito_jwks_cache_seconds == 3600
+    assert settings.auth_leeway_seconds == 60
+
+
+def test_cognito_needs_a_pool_and_a_client() -> None:
+    with pytest.raises(ValidationError, match="cognito_user_pool_id is required"):
+        Settings(_env_file=None, auth_backend="cognito")
+
+    with pytest.raises(ValidationError, match="cognito_user_pool_id is required"):
+        Settings(_env_file=None, auth_backend="cognito", cognito_client_id="client-id")
+
+    with pytest.raises(ValidationError, match="cognito_client_id is required"):
+        Settings(
+            _env_file=None,
+            auth_backend="cognito",
+            cognito_user_pool_id="eu-west-1_TESTPOOL",
+        )
+
+
+def test_an_explicit_issuer_replaces_the_pool_id() -> None:
+    settings = Settings(
+        _env_file=None,
+        auth_backend="cognito",
+        cognito_client_id="client-id",
+        cognito_issuer="https://login.example.com/pool",
+    )
+
+    assert settings.cognito_issuer_url == "https://login.example.com/pool"
+
+
+def test_the_issuer_is_derived_from_the_pool_and_region() -> None:
+    settings = Settings(
+        _env_file=None,
+        auth_backend="cognito",
+        cognito_user_pool_id="eu-west-1_TESTPOOL",
+        cognito_client_id="client-id",
+        cognito_region="eu-west-1",
+    )
+
+    assert settings.authentication_enabled is True
+    assert settings.cognito_issuer_url == (
+        "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_TESTPOOL"
+    )
+
+
+def test_authentication_cannot_be_switched_off_in_production() -> None:
+    # An open API in production is not a warning-level mistake: it is an exposed corpus.
+    with pytest.raises(ValidationError, match="refused in the production environment"):
+        Settings(_env_file=None, environment="production")
+
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        auth_backend="cognito",
+        cognito_user_pool_id="eu-west-1_TESTPOOL",
+        cognito_client_id="client-id",
+    )
+    assert settings.environment == "production"
+
+
+def test_the_queue_backend_can_be_switched_to_sqs() -> None:
+    settings = Settings(
+        _env_file=None,
+        queue_backend="sqs",
+        sqs_queue_url=" https://sqs.eu-west-1.amazonaws.com/1/ingestion ",
+        sqs_region="eu-west-1",
+    )
+
+    assert settings.queue_backend == "sqs"
+    assert settings.sqs_region == "eu-west-1"

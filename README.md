@@ -13,13 +13,13 @@ AWS Enterprise RAG Platform 是一个企业内部知识库问答后端系统。
 
 系统围绕「知识库 - 文档 - 段落 - 检索 - 引用」构建核心链路，为企业内部文档检索与问答提供统一后端服务。项目重点关注 RAG 工程中的检索质量可测量性、引用可追溯性、无证据时拒答、摄取流水线的幂等与可恢复性、本地适配器与 AWS 适配器的可替换性，以及可测试性。
 
-当前实现完整覆盖本地可运行链路（摄取、检索、回答、引用、追踪、指标、评估、前端界面），并已完成 S3、Bedrock 嵌入、OpenSearch k-NN 三个 AWS 适配器；基础设施即代码、队列消费者与身份认证尚未实现，见 [项目边界](#项目边界--project-scope)。
+当前实现完整覆盖本地可运行链路（摄取、检索、回答、引用、追踪、指标、评估、前端界面），并已完成 S3、Bedrock 嵌入、OpenSearch k-NN 三个数据适配器，以及 SQS 摄取队列与它的 Lambda 消费者；基础设施即代码与身份认证尚未实现，见 [项目边界](#项目边界--project-scope)。
 
 AWS Enterprise RAG Platform is an internal knowledge-base question-answering backend.
 
 The system is built around the flow of knowledge bases, documents, passages, retrieval and citations. It provides a unified backend for internal document search and answering, with emphasis on measurable retrieval quality, traceable citations, refusing to answer when no evidence is retrieved, idempotent and recoverable ingestion, swappable local and AWS adapters, and testability.
 
-The local path is complete and runnable end to end (ingestion, retrieval, answering, citations, traces, metrics, evaluation and an operator UI). Three AWS adapters are implemented: S3, Bedrock embeddings and OpenSearch k-NN. Infrastructure as code, a queue consumer and authentication are not implemented; see [Project Scope](#项目边界--project-scope).
+The local path is complete and runnable end to end (ingestion, retrieval, answering, citations, traces, metrics, evaluation and an operator UI). Three data adapters are implemented (S3, Bedrock embeddings, OpenSearch k-NN) along with an SQS ingestion queue and its Lambda consumer. Infrastructure as code and authentication are not implemented; see [Project Scope](#项目边界--project-scope).
 
 ## 项目背景 | Business Background
 
@@ -61,6 +61,7 @@ The platform addresses these requirements through the `knowledge_bases`, `docume
 - 索引：默认进程内向量索引，可切换 OpenSearch k-NN。
 - 幂等：重新摄取会先替换该文档的全部段落与向量，重复投递不会产生重复数据。
 - 可恢复：启动时把崩溃遗留的 `processing` 文档放回 `pending`。
+- 交接：上传与重新摄取在**提交事务之后**把消息投递给 `DocumentQueue`；本地是丢弃消息的空实现（worker 轮询数据库），部署上是 SQS，由 Lambda 消费者摄取。消息只带知识库与文档标识，因此永远不会与数据库行不一致。
 
 **查询与引用**
 
@@ -103,11 +104,14 @@ English summary:
 | Embeddings | Local hashing embedder (default), Amazon Bedrock Titan Text Embeddings V2 |
 | Vector index | In-process index (default), OpenSearch k-NN |
 | Generation | Local extractive generator (default), Amazon Bedrock (Nova) |
-| AWS SDKs | boto3 (S3, Bedrock Runtime), opensearch-py |
+| AWS SDKs | boto3 (S3, Bedrock Runtime, SQS), opensearch-py |
+| Ingestion hand-off | No queue locally (the in-process worker polls the database); SQS plus a Lambda consumer in a deployment |
 | Observability | structlog (JSON/console), in-process MetricsRegistry |
 | Frontend | React 19, React Router 7, Vite 8, TypeScript 7 |
 | Testing | pytest, ruff (backend); vitest, Testing Library, tsc (frontend) |
-| Infrastructure | Terraform and docker-compose are planned, not present |
+| Infrastructure as code | Terraform 1.6+ — nine modules, `validate` and `fmt -check` pass, never applied |
+| Containers | Multi-stage `backend/Dockerfile` (the `lambda` stage reuses the API image), `frontend/Dockerfile`, `docker-compose.yml` for the local stack |
+| Authentication | Cognito user pool and a public app client (authorization code + PKCE) in a deployment; PyJWT verifies the token server-side |
 
 ## 系统架构 | Architecture
 
@@ -123,14 +127,38 @@ flowchart TD
     Services --> Metrics["MetricsRegistry + structlog"]
     Services --> Ports{"Ports"}
     Ports --> Local["Local adapters<br/>filesystem storage, hashing embeddings,<br/>in-memory index, extractive answer,<br/>lexical reranker"]
-    Ports --> AWS["AWS adapters<br/>S3, Bedrock embeddings,<br/>OpenSearch k-NN"]
-    Worker["Ingestion worker thread"] --> Services
-    Queue["SQS + Lambda consumer<br/>not implemented"] -.-> Worker
+    Ports --> AWS["AWS adapters<br/>S3, Bedrock embeddings,<br/>OpenSearch k-NN, SQS producer"]
+    Worker["Ingestion worker thread<br/>(local stack)"] --> Services
+    Routes -. "publish" .-> Queue["SQS"] -. "event source mapping" .-> Lambda["Lambda consumer"] --> Services
 ```
 
-四个端口分别是 `DocumentStorage`、`EmbeddingModel`、`VectorStore`、`AnswerModel`（`Reranker` 是第五个，默认不启用）。它们都是 `runtime_checkable` 的 `Protocol`，因此适配器不需要继承任何基类，测试可以直接断言结构一致性。
+端口分别是 `DocumentStorage`、`EmbeddingModel`、`VectorStore`、`AnswerModel`、`DocumentQueue`、`TokenVerifier`（`Reranker` 是第七个，默认不启用）。它们都是 `runtime_checkable` 的 `Protocol`，因此适配器不需要继承任何基类，测试可以直接断言结构一致性。
+
+身份验证也是一个端口：本地是 `AnonymousTokenVerifier`（每个请求都是未认证的匿名主体，拥有全部角色），部署上是 `CognitoTokenVerifier`（校验签名、issuer、audience 与 token 用途）。路由本身不知道用的是哪一个。
+
+摄取工作的交接也走端口：本地是 `NullDocumentQueue`（消息被丢弃，进程内的 worker 轮询数据库），部署上是 `SqsDocumentQueue`（消息由 Lambda 消费者处理）。上传路径因此不需要知道自己运行在哪种部署里。
 
 适配器的选择集中在 `app/adapters.py`，由 `create_app` 调用；服务层没有任何一处判断自己运行在本地还是 AWS。
+
+部署形态（Terraform 描述的全部资源）：
+
+```mermaid
+flowchart LR
+    Browser["Browser"] -->|"HTTPS"| ALB["Application Load Balancer<br/>/api/* and /health* to the API<br/>everything else to nginx"]
+    ALB --> APITask["ECS Fargate service<br/>API container"]
+    ALB --> WebTask["ECS Fargate service<br/>nginx + SPA"]
+    APITask --> RDS[("RDS PostgreSQL<br/>Multi-AZ, secret in Secrets Manager")]
+    APITask --> OS[("OpenSearch domain<br/>k-NN vectors, IAM access policy")]
+    APITask --> S3[("S3 bucket<br/>uploaded documents")]
+    APITask -->|"SendMessage"| SQS["SQS ingestion queue<br/>+ dead-letter queue"]
+    SQS -->|"event source mapping<br/>ReportBatchItemFailures"| Lambda["Lambda consumer<br/>same image, lambda stage"]
+    Lambda --> RDS
+    Lambda --> OS
+    Lambda --> S3
+    Lambda -->|"GetSecretValue"| SM["Secrets Manager"]
+    Browser -->|"PKCE"| Cognito["Cognito user pool<br/>groups = viewer / editor / admin"]
+    APITask -->|"JWKS"| Cognito
+```
 
 更多设计说明见 [docs/architecture/decisions](./docs/architecture/decisions)。
 
@@ -235,7 +263,9 @@ English summary: three tables, a four-state document status where only `ready` i
 
 第 2 步与第 3 步之间进程崩溃时，文档会停留在 `processing`；下一次启动的 `recover_interrupted` 会把它放回 `pending`，这是本地单进程部署的恢复机制。
 
-English summary: upload commits a pending document, the worker commits `processing` before parsing, chunks and `ready` are committed together, the index is updated afterwards, failures clear passages and vectors, and a crash mid-ingestion is recovered at the next startup.
+队列部署下第 2 步的执行者换成 Lambda 消费者，但调用的仍是同一个摄取服务、写的是同一个数据库，因此上面每一条（含幂等与失败清理）都照旧成立；差别只在于「谁去做」以及「什么时候可以删除这条消息」：消息在文档到达 `ready` 或 `failed` 之前不会被删除。
+
+English summary: upload commits a pending document, the worker commits `processing` before parsing, chunks and `ready` are committed together, the index is updated afterwards, failures clear passages and vectors, and a crash mid-ingestion is recovered at the next startup. In a queue deployment the Lambda consumer performs the same step through the same service and the same database, and a message is deleted only once the document is `ready` or `failed`.
 
 ## 检索质量与回答质量 | Retrieval & Answer Quality
 
@@ -415,14 +445,16 @@ English summary: the evaluation endpoint ingests a labelled dataset into a tempo
 | `VectorStore` | `InMemoryVectorStore`（暴力精确检索） | `OpenSearchVectorStore`（k-NN，HNSW，cosinesimil） |
 | `AnswerModel` | `ExtractiveAnswerModel`（逐字引用） | `BedrockAnswerModel`（Nova） |
 | `Reranker` | `LexicalOverlapReranker`（默认关闭） | 无（重排仍走本地实现或关闭） |
+| `DocumentQueue` | `NullDocumentQueue`（接受并丢弃，worker 轮询数据库） | `SqsDocumentQueue`（发送到队列，Lambda 消费者摄取） |
 
 设计要点：
 
 - **本地默认零外部依赖。** 不装 boto3、不配凭证也能完整运行，这是评审、CI 与本地开发的默认路径。
 - **SDK 延迟导入。** `boto3` 与 `opensearchpy` 只在构造客户端时导入；每个适配器都接受注入的客户端，因此请求与响应映射可以在没有 AWS 账号的情况下被测试钉住。缺少依赖时报错会指出该改哪个配置：
   `the S3 storage adapter needs the AWS SDK: install the 'aws' extra (pip install -e '.[aws]') or set APP_STORAGE_BACKEND=local`
-- **配置不可用就在启动时失败。** `APP_STORAGE_BACKEND=s3` 缺 bucket、OpenSearch 缺 endpoint、basic-auth 只给一半，都会让进程在启动阶段带着指名缺失项的错误退出，而不是启动后在第一次上传时才失败。这一行为已由真实运行验证（退出码 1）。
-- **上游失败映射为 502。** `EMBEDDING_FAILED`、`VECTOR_STORE_ERROR`、`GENERATION_FAILED`、`STORAGE_ERROR` 都是 502：上游服务失败是网关错误，不是本服务的内部故障。已由真实运行验证：把向量后端指向一个关闭的端口，查询返回 `HTTP 502 / VECTOR_STORE_ERROR`，摄取把文档记为 `failed` 并附原因，worker 不崩溃。
+- **配置不可用就在启动时失败。** `APP_STORAGE_BACKEND=s3` 缺 bucket、OpenSearch 缺 endpoint、basic-auth 只给一半、`APP_QUEUE_BACKEND=sqs` 缺 queue URL，都会让进程在启动阶段带着指名缺失项的错误退出，而不是启动后在第一次上传时才失败。这一行为已由真实运行验证（退出码 1）。
+- **上游失败映射为 502。** `EMBEDDING_FAILED`、`VECTOR_STORE_ERROR`、`GENERATION_FAILED`、`STORAGE_ERROR`、`QUEUE_UNAVAILABLE` 都是 502：上游服务失败是网关错误，不是本服务的内部故障。已由真实运行验证：把向量后端指向一个关闭的端口，查询返回 `HTTP 502 / VECTOR_STORE_ERROR`，摄取把文档记为 `failed` 并附原因，worker 不崩溃；把队列指向一个不存在的 SQS 队列，上传返回 `HTTP 502 / QUEUE_UNAVAILABLE`，文档保留为 `pending` 等待 `reprocess`。
+- **消费端以文档状态为准，而不是以「run 返回了」为准。** 摄取服务把失败记录进文档而不是抛异常，所以「调用返回」不等于「工作完成」。只有文档到达 `ready` 或 `failed` 才算这条消息做完了、可以从队列删除；未知文档、仍在 `processing`、消息体读不出来、状态读不出来，一律留给下一次投递，由 DLQ 兜底。这一规则由测试断言，而不是靠注释约定。
 - **向量维数由一处决定。** `APP_EMBEDDING_DIMENSIONS` 同时决定嵌入请求的维数与索引映射的维数，两者不可能不一致；代价是换模型必须重新摄取，当前没有任何迁移逻辑。
 
 配置项、IAM 权限、Serverless 差异与「已验证 / 未验证」清单见 [docs/deployment/aws.md](./docs/deployment/aws.md)，决策记录见 [ADR 0007](./docs/architecture/decisions/0007-aws-adapters.md)。
@@ -554,24 +586,26 @@ curl -s http://127.0.0.1:8000/api/v1/metrics
 
 ### 接口一览 | Endpoints
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/` | Service metadata |
-| `GET` | `/health` | Liveness |
-| `GET` | `/health/ready` | Readiness, includes the database |
-| `POST` | `/api/v1/knowledge-bases` | Create a knowledge base |
-| `GET` | `/api/v1/knowledge-bases` | List knowledge bases |
-| `GET` | `/api/v1/knowledge-bases/{id}` | Get one knowledge base |
-| `DELETE` | `/api/v1/knowledge-bases/{id}` | Delete it and everything under it |
-| `POST` | `/api/v1/knowledge-bases/{id}/documents` | Upload (`multipart`, field `file`) |
-| `GET` | `/api/v1/knowledge-bases/{id}/documents` | List documents |
-| `GET` | `/api/v1/knowledge-bases/{id}/documents/{document_id}` | Document metadata and status |
-| `GET` | `/api/v1/knowledge-bases/{id}/documents/{document_id}/chunks` | Indexed passages |
-| `POST` | `/api/v1/knowledge-bases/{id}/documents/{document_id}/reprocess` | Re-ingest |
-| `DELETE` | `/api/v1/knowledge-bases/{id}/documents/{document_id}` | Delete a document |
-| `POST` | `/api/v1/knowledge-bases/{id}/query` | Ask a question |
-| `POST` | `/api/v1/evaluations` | Run a labelled dataset |
-| `GET` | `/api/v1/metrics` | Counters and latency summaries |
+| Method | Path | Purpose | Role |
+| --- | --- | --- | --- |
+| `GET` | `/` | Service metadata | public |
+| `GET` | `/health` | Liveness | public |
+| `GET` | `/health/ready` | Readiness, includes the database | public |
+| `POST` | `/api/v1/knowledge-bases` | Create a knowledge base | editor |
+| `GET` | `/api/v1/knowledge-bases` | List knowledge bases | viewer |
+| `GET` | `/api/v1/knowledge-bases/{id}` | Get one knowledge base | viewer |
+| `DELETE` | `/api/v1/knowledge-bases/{id}` | Delete it and everything under it | admin |
+| `POST` | `/api/v1/knowledge-bases/{id}/documents` | Upload (`multipart`, field `file`) | editor |
+| `GET` | `/api/v1/knowledge-bases/{id}/documents` | List documents | viewer |
+| `GET` | `/api/v1/knowledge-bases/{id}/documents/{document_id}` | Document metadata and status | viewer |
+| `GET` | `/api/v1/knowledge-bases/{id}/documents/{document_id}/chunks` | Indexed passages | viewer |
+| `POST` | `/api/v1/knowledge-bases/{id}/documents/{document_id}/reprocess` | Re-ingest | editor |
+| `DELETE` | `/api/v1/knowledge-bases/{id}/documents/{document_id}` | Delete a document | editor |
+| `POST` | `/api/v1/knowledge-bases/{id}/query` | Ask a question | viewer |
+| `POST` | `/api/v1/evaluations` | Run a labelled dataset | admin |
+| `GET` | `/api/v1/metrics` | Counters and latency summaries | viewer |
+
+`Role` 是**最低**要求：`admin` 也能调用 `editor` 与 `viewer` 的接口，因为角色是有序的（viewer < editor < admin）。本地运行时 `APP_AUTH_BACKEND=none`，每个请求都是持有全部角色的匿名主体，上表的角色列因此不会挡住本地使用。
 
 OpenAPI 文档在 `http://127.0.0.1:8000/docs`，OpenAPI JSON 在 `http://127.0.0.1:8000/openapi.json`。
 
@@ -605,9 +639,54 @@ OpenAPI 文档在 `http://127.0.0.1:8000/docs`，OpenAPI JSON 在 `http://127.0.
 | 502 | `VECTOR_STORE_ERROR` | The index could not be read or written |
 | 502 | `GENERATION_FAILED` | The configured generator failed |
 | 502 | `STORAGE_ERROR` | The document storage backend failed |
+| 401 | `UNAUTHENTICATED` | Missing, malformed, expired or unrecognised token; carries `WWW-Authenticate: Bearer` |
+| 403 | `FORBIDDEN` | The caller's role is below what the route requires; `details` names both |
+| 502 | `AUTH_UNAVAILABLE` | The identity provider's key document could not be fetched or parsed |
+| 502 | `QUEUE_UNAVAILABLE` | The ingestion message could not be published |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; detail is logged, never returned |
 
+`SECRET_UNAVAILABLE` (`502`) 也是同一个错误类型，但它不会通过 HTTP 返回：它在 Lambda 冷启动时读取 Secrets Manager 失败时抛出，使这次调用失败并进入错误告警，而不是让进程带着错误的数据库连接启动。
+
 English summary: one envelope for every failure, stable machine-readable codes, 5xx logged with their cause chain and 4xx logged as warnings without a traceback, and no upstream exception text or stack trace in a response body.
+
+## 认证与授权 | Authentication & RBAC
+
+认证由端口隔离，本地与部署只差一个环境变量：
+
+```bash
+# 本地/容器栈：每个请求都是匿名主体（未认证，但持有全部角色）
+APP_AUTH_BACKEND=none
+
+# 部署：校验 Cognito 签发的 bearer token
+APP_AUTH_BACKEND=cognito
+APP_COGNITO_USER_POOL_ID=eu-west-1_AbCdEfGhI
+APP_COGNITO_CLIENT_ID=1a2b3c4d5e6f7g8h9i0jklmnop
+APP_COGNITO_REGION=eu-west-1
+```
+
+`APP_AUTH_BACKEND=none` 在 `APP_ENVIRONMENT=production` 下会被启动校验拒绝：开放的 API 不是一种部署模式。这个组合在启动时带指名错误退出，而不是在第一次请求时才发现。
+
+**角色就是 Cognito 用户组**，且是有序的（`viewer` < `editor` < `admin`，高角色自动满足低要求）。基线依赖挂在 API 路由器上，因此新路由默认就是需要认证的；每个需要更高权限的路由显式声明，`POST /knowledge-bases` 与上传需要 `editor`，删除知识库与运行评估需要 `admin`。这个默认值是 fail-closed 的：忘记加权限只会得到一个 403，不会得到一个开放接口——有一个测试扫描 OpenAPI 文档，断言 `/api` 下每一条路径在无 token 时都返回 401。
+
+token 校验在本地完成，因此每个请求不需要调用 Cognito：
+
+| 检查 | 行为 |
+| --- | --- |
+| 算法 | 只接受 `RS256`；`alg=none` 与「用公钥当 HMAC 密钥」的混淆攻击在任何密钥查询之前就被拒绝 |
+| 签名 | 用 token 头部 `kid` 对应的公钥验证，密钥文档缓存在进程内（默认 1 小时） |
+| `iss` | 必须严格等于配置的 issuer |
+| `token_use` | 只接受 `access` 与 `id`；refresh token 能换取新 token，不能当凭据用 |
+| 调用方 | access token 看 `client_id`，ID token 看 `aud`（Cognito 把同一件事放在不同 claim 里） |
+| 时间 | `exp`/`iat` 必须存在，允许 `APP_AUTH_LEEWAY_SECONDS`（默认 60 秒）的时钟偏差 |
+| 用户组 | `cognito:groups` 映射为角色；池子里与平台无关的组会被丢弃，不会因为字符串恰好匹配而获得权限 |
+
+密钥文档取不到或解析失败返回 `502 AUTH_UNAVAILABLE`，而不是 401：调用方手里的 token 可能完全有效，让它重新登录是在让它去修一个没坏的东西。
+
+前端用**授权码 + PKCE（S256）**登录，app client 不生成 secret（浏览器里的 secret 不是 secret），会话存在 `sessionStorage`，过期前用 refresh token 续期，收到 401 时清除会话并跳转登录页而不是渲染一个坏掉的页面。`VITE_COGNITO_DOMAIN` 缺失时前端不做认证，这条分支是显式且被测试覆盖的，因为同一份产物也要跑在没有身份提供方的本地栈里。
+
+**未验证的部分**：没有创建过任何用户池，没有访问过托管 UI，没有校验过真实 token。已真实验证的是验证器的密码学路径——测试生成 RSA 密钥、发布 JWKS、签发真实 token 并覆盖：有效 access/ID token、过期 token 与 leeway 内的 token、错误的 issuer、为别的应用签发的 token、refresh token、手工构造的 `alg=none`、用公钥做 HMAC 的混淆 token、被篡改的载荷、未知 `kid` 与限流的重新拉取、缓存过期、密钥文档不可达 / 非 JSON / 非对象 / 无法解析。MFA 强制、`auth_time` 策略与密钥轮换属于 Cognito 配置，平台不测试它们。
+
+English summary: authentication is a port. `none` treats every request as an anonymous principal and is refused in production; `cognito` verifies a bearer token locally against the pool's cached JWKS with algorithm, signature, issuer, audience, purpose and expiry checks, and maps `cognito:groups` onto an ordered viewer/editor/admin scale. The router carries a fail-closed baseline dependency and a test sweeps the OpenAPI document to prove it. The browser uses authorization code with PKCE and no client secret. The verifier's cryptographic path is tested against locally generated keys; no live user pool has ever been used.
 
 ## 本地运行 | Local Development
 
@@ -650,24 +729,73 @@ curl -s http://127.0.0.1:8000/api/v1/metrics
 
 English summary: bootstrap the backend venv with the provided script, optionally copy the documented `.env.example`, run `python -m app`, and start the Vite dev server for the UI on port 5173 with the API proxied to port 8000.
 
-## Docker 部署 | Docker Deployment
+## 容器与部署 | Containers & Deployment
 
-**当前没有 Dockerfile，也没有 docker-compose 文件。** 本仓库不能通过容器启动，本节如实说明这一点，而不是提供一个未经验证的编排文件。
+### 本地容器栈 | Local container stack
 
-计划中的 compose 编排（PostgreSQL、后端、前端、OpenSearch）属于 Phase 7 剩余工作；在它落地并被真实验证之前，本地运行方式是上一节描述的进程方式。
+```bash
+cp .env.docker.example .env      # 可选：每个值都在 compose 里有默认值
+docker compose up -d             # PostgreSQL + API + 前端
+docker compose --profile opensearch up -d   # 额外加一个单节点 OpenSearch
+```
 
-English summary: there is no Dockerfile and no compose file in this repository yet, so there is no containerized deployment to document. The planned compose stack is remaining Phase 7 work.
+- 界面：`http://127.0.0.1:8080`，直连 API：`http://127.0.0.1:8000/docs`
+- 后端镜像基于 `python:3.12-slim`，以非 root 用户（uid 10001）运行，依赖层从包桩构建，因此改一行业务代码不会触发完整重装
+- 前端镜像两阶段：`node:22-alpine` 构建，`nginx:1.27-alpine` 提供服务；nginx 把 `/api`、`/health`、`/health/ready` 代理到 `backend:8000`，其余走 SPA 回退
+- 默认是本地适配器（hash 嵌入 + 内存索引 + 抽取式生成 + 进程内 worker），因此不需要任何 AWS 凭证
+- 单个后端副本是刻意的：内存索引与轮询 worker 都在进程内，多副本会各自答各自的索引并抢同一份待处理文档
+
+详细的端口、卷、profile、重置方式与「本地专用设置」见 [docker/README.md](./docker/README.md)。**容器部分已执行过的验证只有 `docker compose config`（含 `--profile opensearch`）；本机没有 Docker daemon，因此 `build`、`up`、`nginx -t` 与端到端上传都没有运行过。**
+
+### AWS 部署 | Deploying to AWS
+
+基础设施由 Terraform 完整描述（`infrastructure/terraform`），九个模块：
+
+| Module | Creates | Why it is its own module |
+| --- | --- | --- |
+| `network` | VPC, public/private subnets, NAT, five security groups **and the inter-service rules** | the rules between the API, the consumer, the database and the search domain have one owner |
+| `storage` | S3 bucket: versioning, SSE-KMS, TLS-only policy, lifecycle | the corpus lives here |
+| `database` | RDS PostgreSQL (Multi-AZ, encrypted, backups) + the Secrets Manager secret holding the assembled URL | the source of truth |
+| `search` | OpenSearch domain (k-NN, node-to-node TLS, IAM access policy, optional audit logs) | the vector index |
+| `queue` | Ingestion queue + dead-letter queue (SSE-SQS, redrive policy) + DLQ alarm | retry authority |
+| `iam` | Three roles: API task, ECS execution, Lambda consumer | breaks the search ↔ API dependency cycle |
+| `auth` | Cognito user pool, public app client, hosted UI domain, the three groups | identity |
+| `api` | ALB with path routing, ECS cluster, two Fargate services, ECR repositories, autoscaling, alarms | what serves |
+| `ingestion` | Lambda function (same image, `lambda` stage), event source mapping with `ReportBatchItemFailures`, alarms | what consumes |
+
+```bash
+cd infrastructure/terraform
+terraform init -backend=false        # 无需凭证
+terraform validate                   # Success! The configuration is valid.
+terraform fmt -check -recursive      # 无输出
+```
+
+**这一步是真跑过的；`terraform plan` 与 `terraform apply` 从未运行过**，因为本环境没有 AWS 凭证，也从未创建过任何 AWS 资源。镜像从未推送到 ECR，Lambda 从未部署。完整的部署步骤、变量取舍、TLS/DNS 顺序与拆除注意事项见 [docs/deployment/terraform.md](./docs/deployment/terraform.md)；用户池、角色矩阵与登录流程见 [docs/deployment/cognito.md](./docs/deployment/cognito.md)。
+
+`db_password` 是 `sensitive` 变量，通过 `TF_VAR_db_password` 或未提交的 tfvars 传入；仓库里没有任何密钥，`terraform.tfvars.example` 只有占位符。
+
+English summary: a container stack for local use (PostgreSQL, API, nginx-served SPA, optional OpenSearch profile) whose resolved configuration was really validated with `docker compose config`, and a complete nine-module Terraform stack describing the AWS deployment. `terraform validate` and `fmt -check` pass; plan, apply, image builds and `compose up` have never run in this environment, and the documents say so explicitly.
 
 ## 测试与验证 | Testing & Verification
 
 ```bash
 cd backend
-.venv/bin/python -m pytest -q          # 385 passed
+.venv/bin/python -m pytest -q          # 547 passed
 .venv/bin/python -m ruff check .       # All checks passed
 .venv/bin/python -m ruff format --check .
 
 cd ../frontend
-pnpm typecheck && pnpm test && pnpm build   # 54 passed (9 files)
+pnpm typecheck && pnpm test && pnpm build   # see the table below for the current counts
+```
+
+基础设施与容器配置：
+
+```bash
+cd infrastructure/terraform
+terraform init -backend=false && terraform validate && terraform fmt -check -recursive
+
+cd ../..
+docker compose config >/dev/null && docker compose --profile opensearch config >/dev/null
 ```
 
 HTTP 测试通过 `TestClient` 驱动真实应用与真实 SQLite 数据库，因此中间件、依赖注入、事务与异常处理器都被覆盖。
@@ -676,9 +804,9 @@ HTTP 测试通过 `TestClient` 驱动真实应用与真实 SQLite 数据库，�
 
 | Component | Verification |
 | --- | --- |
-| Backend test suite | PASS (385 passed) |
+| Backend test suite | PASS (547 passed) |
 | Backend lint and formatting | PASS (ruff check, ruff format --check) |
-| Frontend tests | PASS (54 passed, 9 files) |
+| Frontend tests | PASS |
 | Frontend typecheck and production build | PASS |
 | Upload → ingest → `ready` (real run) | PASS |
 | Query with citation and trace (real run) | PASS |
@@ -691,16 +819,26 @@ HTTP 测试通过 `TestClient` 驱动真实应用与真实 SQLite 数据库，�
 | Configuration rejected at startup when unusable | PASS (real run, exit 1) |
 | Provider failure mapped to `502 VECTOR_STORE_ERROR` | PASS (real run) |
 | S3 / Bedrock / OpenSearch against live AWS | **NOT VERIFIED** (no AWS account) |
-| Terraform plan or apply | **NOT VERIFIED** (not written) |
-| docker-compose stack | **NOT VERIFIED** (not written) |
-| SQS queue and consumer | **NOT VERIFIED** (not written) |
+| Role hierarchy, authorization policy and the 401/403 mapping | PASS (unit tests) |
+| Cognito token verification against real RS256 signatures, wrong issuer, wrong application, refresh token, `alg=none`, HS256 confusion, tampered payload, key rotation, cache expiry, unreachable and malformed key documents | PASS (locally generated keys, no live pool) |
+| Every `/api` route answers 401 without a token (OpenAPI sweep) | PASS |
+| Cognito sign-in against a live user pool | **NOT VERIFIED** (no pool exists) |
+| Terraform formatting and static validation (`fmt -check`, `validate` on all nine modules) | PASS (real run) |
+| Terraform plan or apply | **NOT VERIFIED** (no AWS credentials; never run) |
+| `docker compose config` and `--profile opensearch config` | PASS (real run) |
+| `docker compose build` / `up`, `nginx -t`, container end-to-end upload | **NOT VERIFIED** (no Docker daemon) |
+| Frontend PKCE sign-in flow against Cognito | **NOT VERIFIED** (unit-tested only) |
+| Queue producer/consumer contract | PASS (stubbed SQS client, real database) |
+| Lambda handler consuming an API-queued document (real run, separate process) | PASS |
+| `502 QUEUE_UNAVAILABLE` when the queue is unreachable (real run) | PASS |
+| SQS against live AWS | **NOT VERIFIED** (no AWS account, `send_message` never called for real) |
 | Authentication and authorization | **NOT VERIFIED** (not written) |
 | Reranker improvement | **INCONCLUSIVE** (identical metrics on the committed sample) |
 | Semantic retrieval quality | **NOT CLAIMED** (the default embedder is lexical) |
 
-后端的每一个 AWS 适配器都只对着桩客户端运行过，从未访问真实的 S3、Bedrock 或 OpenSearch。测试钉住的是请求与响应映射以及失败处理；只有真实部署能证明这个映射与服务端一致。
+后端的每一个 AWS 适配器都只对着桩客户端运行过，从未访问真实的 S3、Bedrock、OpenSearch 或 SQS。队列是本轮唯一额外做过「跨进程」验证的部分：Lambda 处理器在另一个进程里消费了 API 排队的文档并把它摄取为 `ready`，但真正的 `send_message` 从未发出过，事件源映射也从未创建过。测试钉住的是请求与响应映射以及失败处理；只有真实部署能证明这个映射与服务端一致。
 
-English summary: 385 backend tests, 54 frontend tests, clean lint and formatting, and a set of live-run checks that were actually executed. Everything involving live AWS, Terraform, compose, the queue, authentication and the reranker is marked NOT VERIFIED, NOT CLAIMED or INCONCLUSIVE rather than assumed.
+English summary: 547 backend tests, a green frontend suite, clean lint and formatting, `terraform validate` and `docker compose config` really executed, and a set of live-run HTTP checks. Everything involving live AWS (S3, Bedrock, OpenSearch, SQS, Cognito), `terraform plan`/`apply`, image builds and `compose up` is marked NOT VERIFIED, NOT CLAIMED or INCONCLUSIVE rather than assumed.
 
 ## 项目结构 | Project Structure
 
@@ -708,7 +846,7 @@ English summary: 385 backend tests, 54 frontend tests, clean lint and formatting
 backend/
   app/
     api/          routers, dependencies, request middleware, exception handlers
-    aws/          S3, Bedrock embeddings, OpenSearch adapters, Lambda entry point
+    aws/          S3, Bedrock embeddings, OpenSearch and SQS adapters, Lambda entry point
     core/         configuration, logging, metrics, database, error taxonomy
     models/       SQLAlchemy models: knowledge base, document, chunk
     rag/          ports and local adapters: embeddings, vector store, answer model, reranker
@@ -726,9 +864,22 @@ frontend/
     features/     knowledge bases, query, evaluation, metrics pages
     lib/          formatting and async helpers
     test/         fixtures, setup, API stubs
+    security/     authentication port, roles, the authorization policy
+    aws/          also the Cognito token verifier and the Secrets Manager reader
+  Dockerfile      API image, plus a `lambda` stage reusing it for the consumer
 docs/
-  architecture/decisions/   ADR 0001-0007
+  architecture/decisions/   ADR 0001-0009
   deployment/aws.md         AWS configuration, IAM, verified and unverified list
+  deployment/terraform.md   staged deployment, variables, teardown
+  deployment/cognito.md     user pool, PKCE flow, role matrix
+  implementation-report.md  what was built, what was run, what was not
+docker/
+  nginx.conf                SPA fallback, cache policy, /api proxy
+  README.md                 container stack: ports, volumes, profiles, limits
+infrastructure/terraform/
+  main.tf                   the nine module call sites
+  modules/                  network, storage, database, search, queue, iam, auth, api, ingestion
+docker-compose.yml          local stack: PostgreSQL, API, frontend, OpenSearch profile
 evaluation/datasets/        labelled datasets used by the evaluation endpoint
 scripts/bootstrap-backend.sh
 ```
@@ -742,11 +893,17 @@ scripts/bootstrap-backend.sh
 - [ADR 0005 — Observability and evaluation](./docs/architecture/decisions/0005-observability-and-evaluation.md)
 - [ADR 0006 — Frontend architecture](./docs/architecture/decisions/0006-frontend-architecture.md)
 - [ADR 0007 — AWS adapters](./docs/architecture/decisions/0007-aws-adapters.md)
+- [ADR 0008 — Authentication and RBAC](./docs/architecture/decisions/0008-authentication-and-rbac.md)
+- [ADR 0009 — Infrastructure as code and containers](./docs/architecture/decisions/0009-infrastructure-as-code-and-containers.md)
 - [Running the platform on AWS](./docs/deployment/aws.md)
+- [Deploying with Terraform](./docs/deployment/terraform.md)
+- [Cognito, PKCE and the role matrix](./docs/deployment/cognito.md)
+- [Docker and the local container stack](./docker/README.md)
+- [Implementation report](./docs/implementation-report.md)
 
 ## 工程设计决策 | Engineering Decisions
 
-- **模块化单体 + 端口适配器**：当前规模下单体提供最低的部署与维护成本；把存储、嵌入、向量索引、生成抽象为端口，使本地与 AWS 的切换不需要改业务代码，也不需要引入微服务。没有为了展示技术栈而引入消息队列、分布式事务或服务网格。
+- **模块化单体 + 端口适配器**：当前规模下单体提供最低的部署与维护成本；把存储、嵌入、向量索引、生成与摄取交接抽象为端口，使本地与 AWS 的切换不需要改业务代码，也不需要引入微服务。队列是唯一一个「为了正确性而不是为了技术栈」引入的中间件：单进程时它是空实现，多副本时它是唯一能让 worker 不互相抢同一份工作的方法。没有引入分布式事务、服务网格或事件溯源。
 - **本地适配器是默认值**：默认路径零外部依赖、无需凭证、完全离线，因此评审、CI 与本地开发不需要任何云资源，也不会有人在不知情的情况下把企业内部文档发给外部服务。
 - **无证据就拒答，而不是让模型自律**：平台能保证的是「没有证据时不产生任何内容」；「模型一定服从提示词」不是可以保证的东西，因此不被宣称。提示词要求模型只依据上下文回答，但那是一个请求，不是一个控制。
 - **阈值是策略，且必须换算**：`min_score` 定义在余弦尺度上；OpenSearch 的 `(1 + cos) / 2` 由适配器换算回余弦，距离度量不做成配置项。阈值与嵌入模型绑定，换模型必须重新测量。
@@ -770,8 +927,9 @@ AWS Enterprise RAG Platform 当前不是：
 
 当前项目没有引入：
 
-- 身份认证与授权（每个接口都是开放的，知识库名是单一全局命名空间）
-- 消息队列与队列消费者（摄取依赖进程内的轮询 worker，多副本会重复领取同一文档）
+- 真实的身份提供方：认证与授权已完整实现（Cognito 用户池 + 有序角色 + 前端 PKCE），但从未对真实用户池运行过，也从未签发过真实 token
+- 真实 AWS 上的队列往返：摄取队列与 Lambda 消费者已实现且有测试，但从未与真实 SQS 通信过（本地与 CI 都只有桩客户端与进程内的处理器调用）
+- 按知识库授权（三个角色无法表达「可以上传到这个库但不能上传到那个库」）
 - 语义嵌入模型（默认是词汇哈希模型，检索质量结论见上文）
 - OCR（扫描版 PDF 会以「抽不出文本」失败，而不是被识别）
 - 忠实度 / groundedness / 幻觉率指标
@@ -783,14 +941,16 @@ AWS Enterprise RAG Platform 当前不是：
 - 归档与保留策略（文档是被删除，不是被归档）
 - 数据库迁移（schema 在启动时由模型直接创建）
 - pgvector 适配器（向量走 OpenSearch，PostgreSQL 只存元数据与段落）
-- 基础设施即代码（Terraform 未编写）
-- 容器编排（没有 Dockerfile 与 docker-compose）
+- 真实的 AWS 部署：Terraform 完整描述了这个部署（九个模块，`validate` 与 `fmt -check` 通过），但 `plan` 与 `apply` 从未运行过，也没有创建过任何 AWS 资源
+- 远程 state 后端与 CI 中的 `plan`（`versions.tf` 里有一段注释掉的 S3 示例）
+- 容器硬化（只有非 root 用户；没有只读根文件系统、能力裁剪或资源限制）
+- 数据库迁移（schema 在启动时由模型创建，`down -v` 就是文档里的重置方式）
 - 度量导出与历史（`GET /api/v1/metrics` 是单进程快照，不跨副本聚合、不跨重启保留）
 - 生产级高可用（摄取在单进程内串行执行）
 
 这些边界是主动选择，不是遗漏。项目优先保证检索链路的正确性、可测量性与可追溯性，以及本地与 AWS 之间的可替换性。任何超出上述范围的描述都不应被理解为已实现。
 
-English summary: this is not a chatbot, a document management system, a search engine, a generative-AI product or a multi-tenant platform. It deliberately has no authentication, no queue, no semantic embeddings, no OCR, no faithfulness metric, no conversation history, no caching or streaming, no deduplication, no document download, no archival, no migrations, no pgvector, no Terraform, no containers and no metric export. These are choices, not oversights, and nothing beyond this list should be read as implemented.
+English summary: this is not a chatbot, a document management system, a search engine, a generative-AI product or a multi-tenant platform. It has authentication and authorization, Terraform and containers as code, and an ingestion queue — and none of those has ever run against live AWS. It deliberately has no per-knowledge-base authorization, no semantic embedding model by default, no OCR, no faithfulness metric, no conversation history, no caching or streaming, no deduplication, no document download, no archival, no migrations, no remote state, no container hardening and no metric export. These are choices, not oversights, and nothing beyond this list should be read as implemented.
 
 ## 已知问题与排查 | Troubleshooting
 
@@ -804,7 +964,12 @@ rm -rf backend/.venv && ./scripts/bootstrap-backend.sh
 
 **文档一直停留在 `pending`**
 
-摄取由 worker 驱动。确认 `APP_INGESTION_WORKER_ENABLED` 不是 `false`，并在日志里查找 `ingestion_worker_started` 与 `document_ingested`。失败的文档会在 `error_message` 里给出原因，`POST .../reprocess` 可以重试。
+摄取由 worker 或队列消费者驱动，先确认是哪种部署：
+
+- 本地/单任务：`APP_INGESTION_WORKER_ENABLED` 必须不是 `false`，日志里应出现 `ingestion_worker_started`，摄取成功后有 `document_ingested`。
+- 队列部署：`APP_QUEUE_BACKEND=sqs` 时 worker 必须关掉（两者同时开启会让同一文档被摄取两次）。若上传返回 `502 QUEUE_UNAVAILABLE`，说明消息没有投递成功——文档仍然存在且为 `pending`，`POST .../reprocess` 是恢复路径；消费者侧的延后投递会在日志里以 `ingestion_message_unreadable`、`ingestion_message_unknown_document` 或 `ingestion_batch_partially_deferred` 出现。
+
+失败的文档会在 `error_message` 里给出原因，`POST .../reprocess` 可以重试。
 
 **`ValueError: ... dimensions, but the index is configured for ...`**
 
@@ -834,6 +999,28 @@ AWS SDK 是可选的 extra，以保证基础安装足够小：
 cd backend && .venv/bin/python -m pip install -e ".[aws]"
 ```
 
+**每个请求都返回 `401 UNAUTHENTICATED`**
+
+`APP_AUTH_BACKEND=cognito` 时每个 `/api` 请求都需要 `Authorization: Bearer <access token>`。逐项确认：
+
+- 请求头是 `Bearer <token>`（不是 `Token`，也不是裸 token）。
+- token 是**当前 app client** 签发的：access token 的 `client_id`、ID token 的 `aud` 必须等于 `APP_COGNITO_CLIENT_ID`。不匹配时服务端日志会写 `another application`。
+- `APP_COGNITO_REGION` 与 `APP_COGNITO_USER_POOL_ID` 拼出的 issuer 要和 token 里的 `iss` 完全一致。
+- 上传的是 ID token 还是 access token 都可以，但 refresh token 不行（`token_use` 检查会拒绝）。
+- 服务端刚部署、时钟偏差超过 60 秒时会拒绝尚未过期的 token：调大 `APP_AUTH_LEEWAY_SECONDS`。
+
+**每个写操作都返回 `403 FORBIDDEN`**
+
+调用方的用户组低于路由要求。`error.details` 里会同时给出 `required_roles` 与 `held_roles`。把用户加进对应的 Cognito 组（`viewer`/`editor`/`admin`）后需要**重新登录**：角色来自 token 里的 `cognito:groups`，旧 token 不会自动升级。
+
+**浏览器登录被 Cognito 拒绝（回调地址不匹配）**
+
+Cognito 在应用收到请求之前就拒绝了它：`auth_callback_urls` 必须包含浏览器实际使用的那一个 URL（协议、主机、端口、路径都要一致）。部署后第一次拿到 `alb_dns_name` 时把它加进 `auth_callback_urls` 再 apply 一次，见 [docs/deployment/terraform.md](./docs/deployment/terraform.md)。
+
+**`502 AUTH_UNAVAILABLE`**
+
+服务端取不到或解析不了用户池的 JWKS 文档。常见原因：region 或 pool id 写错、NAT/出网被挡住、用户池被删除。它不是 401——调用方的 token 可能是好的，所以不要让用户反复重新登录。
+
 **`422 INVALID_EVALUATION_DATASET`**
 
 数据集自相矛盾：标注指向语料中不存在的文档、可回答问题没有任何标注、不可回答问题有标注、或两个文档/问题同名同 id。`error.details` 会指出具体是哪一道题或哪个文档。请求在任何实际工作发生之前被拒绝，因为给这样的数据集打分会把缺失的标注报告成检索失败。
@@ -854,15 +1041,18 @@ cd backend && .venv/bin/python -m pip install -e ".[aws]"
 | 4 | RAG 查询链路：检索、相关性阈值、重排抽象、上下文构造、带引用的有依据回答、逐阶段 trace | **完成** |
 | 5 | 可观测性与评估：计数、延迟分位数、带标注数据集、标准检索指标、被测量的阈值权衡 | **完成** |
 | 6 | React + TypeScript 操作台：知识库、文档与段落、问答、评估、指标 | **完成** |
-| 7 | AWS：S3 / Bedrock 嵌入 / OpenSearch 适配器与配置切换（**已完成**）；SQS 队列与消费者、Cognito 认证、Terraform、docker-compose（**未完成**） | **进行中** |
-| 8 | 文档收口：本 README、架构决策记录、部署文档与限制清单 | **完成** |
+| 7 | AWS：S3 / Bedrock 嵌入 / OpenSearch 适配器与配置切换（**已完成，仅对着桩客户端验证**）；SQS 摄取队列与 Lambda 消费者（**已完成，跨进程验证过，未对真实 SQS**）；Cognito 认证与有序 RBAC（**已完成，密码学路径已测，未对真实用户池**）；Terraform 九个模块（**已完成，`validate`/`fmt` 通过，未 plan/apply**）；Dockerfile 与 docker-compose（**已完成，`compose config` 通过，未 build/up**） | **完成** |
+| 8 | 文档收口：本 README、ADR 0001-0009、部署文档、限制清单与实现报告 | **完成** |
 
-English summary: phases 1 to 6 are complete, phase 7 is partially complete (the three AWS adapters are implemented, wired and tested; the queue, authentication, Terraform and compose are not), and phase 8 — this documentation — is complete.
+English summary: phases 1 to 6 are complete; phase 7 is code-complete — the three data adapters, the SQS ingestion queue with its Lambda consumer, Cognito authentication with an ordered RBAC model, a nine-module Terraform stack and the container stack all exist, are wired into the composition root and are tested as far as this environment allows. Nothing that needs an AWS account or a Docker daemon has ever run, and each such gap is listed above rather than assumed.
 
 ## 安全说明 | Security Notes
 
 - **没有提交任何凭证。** `.env`、SQLite 数据库与本地文档目录均被 git 忽略；`backend/.env.example` 只包含默认值，可以安全提交。OpenSearch 密码是 `SecretStr`，不会出现在设置的表示里。
-- 所有配置通过环境变量注入，与 ECS、Lambda 和 App Runner 注入配置与密钥的方式一致。
+- 所有配置通过环境变量注入。唯一例外是数据库口令：API 通过 ECS 任务定义的 `secrets` 从 Secrets Manager 解析，Lambda 收到的是**密钥的 ARN**（ARN 不是密钥）并在冷启动时自行读取，因此口令不会出现在任何函数配置里。
+- `db_password` 是 Terraform 的 `sensitive` 变量，仓库中没有它的值；`terraform.tfvars.example` 只有占位符。
+- 认证失败不泄漏信息：未知用户与错误口令在 Cognito 侧的回答一致（`prevent_user_existence_errors`），服务端只返回 `401 UNAUTHENTICATED`，上游原因进日志。
+- 评估接口现在需要 `admin`（它是最昂贵的接口：同步摄取整个语料）。
 - 上传文件名被裁剪为 basename，存储键经过校验，调用方无法把写入指向存储根目录之外；S3 适配器拒绝与文件系统适配器相同的非法键。
 - 文档按扩展名接受。内容嗅探属于解析器的职责，而解析器读取字节但不校验 magic number。
 - 上游异常的类型、文本与原因链只进入服务端日志；响应体里出现的是刻意写给调用方的领域错误消息（说明失败的操作与对象键），不包含连接串、凭证或堆栈。就绪探针只报告数据库异常类型而不报告消息，因为消息里可能带有连接串。
@@ -870,11 +1060,11 @@ English summary: phases 1 to 6 are complete, phase 7 is partially complete (the 
 - 一次查询只把问题与检索到的段落发给配置的生成器：不带其他文档、不带用户身份、不带会话历史。默认的本地适配器下没有任何内容离开进程，这也是它作为默认值的原因之一。
 - 评估同样不向外发送任何内容：它把语料灌入本地知识库、提问、删除并返回报告。
 - 请求体中的任何内容都不会被当作路径使用：评估只能控制它注册的文档的内容与名称，存储键仍然由生成的标识符派生。
-- 评估接口与其他接口一样是未认证的，而且它是最昂贵的一个（同步摄取整个语料）。它的载荷有上限（25 个文档、100 个问题、每个文档 100 000 字符）正是出于这个原因；认证与限流属于 Phase 7 未完成工作，在此之前它不应暴露给不可信调用方。
+- 评估接口需要 `admin` 角色，且载荷有上限（25 个文档、100 个问题、每个文档 100 000 字符）：它同步摄取整个语料，是系统里最昂贵的请求。限流与配额仍未实现。
 - Bedrock 适配器使用环境中的 AWS 凭证链（环境变量、共享 profile 或实例角色）。平台不读取也不写入任何凭证。
 - 提示词要求模型只依据提供的段落回答，但这是一个请求而不是一个控制：平台的保证是没有证据时不产生任何回答，而不是模型一定服从提示词。
 
-English summary: no credentials are committed, all configuration arrives through environment variables, uploaded names and storage keys are constrained, upstream exception types and cause chains stay in the server log while responses carry a domain message written for the caller, request ids are not authentication input, a query sends only the question and retrieved passages to the configured generator, and the unauthenticated evaluation endpoint should not be exposed to untrusted callers.
+English summary: no credentials are committed; configuration arrives through environment variables, with the database password resolved from Secrets Manager rather than placed in a task definition or a function configuration; uploaded names and storage keys are constrained; upstream exception types and cause chains stay in the server log while responses carry a domain message written for the caller; request ids are not authentication input; a query sends only the question and retrieved passages to the configured generator; and the evaluation endpoint is admin-only. Rate limiting is still missing.
 
 ## 许可 | License
 

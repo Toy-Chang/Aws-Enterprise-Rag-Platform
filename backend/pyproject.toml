@@ -25,12 +25,25 @@ aws = [
   "boto3>=1.35,<2.0",
   "opensearch-py>=2.7,<3.0",
 ]
+# Verifying a Cognito token needs JWT parsing and RSA verification. Kept out of the base
+# install for the same reason as the AWS SDK: a deployment that runs with
+# APP_AUTH_BACKEND=none never imports it.
+auth = [
+  "pyjwt[crypto]>=2.8,<3.0",
+  "psycopg[binary]>=3.2,<4.0",
+]
+# The production stack points APP_DATABASE_URL at postgresql+psycopg://. The binary wheel
+# bundles libpq, so the image needs neither a compiler nor PostgreSQL client libraries.
+postgres = [
+  "psycopg[binary]>=3.2,<4.0",
+]
 dev = [
   "pytest>=8.3,<9.0",
   "httpx2>=2.13,<3.0",
   "ruff>=0.7,<1.0",
   "boto3>=1.35,<2.0",
   "opensearch-py>=2.7,<3.0",
+  "pyjwt[crypto]>=2.8,<3.0",
 ]
 
 [tool.setuptools.packages.find]

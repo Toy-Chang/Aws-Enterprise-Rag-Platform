@@ -1,0 +1,35 @@
+# Copy to terraform.tfvars and fill in. Never commit the result: it carries the
+# database password. Pass it as TF_VAR_db_password instead if you prefer.
+
+project     = "rag-platform"
+environment = "production"
+region      = "eu-west-1"
+
+# RDS refuses anything shorter, and this one is a real credential.
+db_password = "change-me-to-a-long-random-value"
+
+# Two tasks by default; one is enough for a trial.
+api_desired_count = 2
+
+# Multi-AZ and deletion protection are on by default. A trial account that wants to be
+# able to tear the stack down has to turn both off explicitly, which is the point.
+db_multi_az            = true
+db_deletion_protection = true
+
+# The search domain is the most expensive resource here. Two r6g.large nodes and 100 GiB
+# each is a production shape; or1.medium.search with one node is enough to try it.
+search_instance_type  = "r6g.large.search"
+search_instance_count = 2
+
+# Sign-in. Replace with the deployed frontend URL after the first apply; the load
+# balancer's DNS name is in the `alb_dns_name` output.
+auth_callback_urls = ["http://localhost:5173/callback"]
+auth_logout_urls   = ["http://localhost:5173/"]
+
+# Without a certificate the load balancer serves HTTP, which is for trials only: the
+# bearer tokens would travel in clear text.
+# certificate_arn = "arn:aws:acm:eu-west-1:123456789012:certificate/00000000-0000-0000-0000-000000000000"
+
+# generation_provider = "bedrock" needs model access for the generation model in this
+# region. "local" answers extractively from the retrieved passages and needs nothing.
+generation_provider = "bedrock"

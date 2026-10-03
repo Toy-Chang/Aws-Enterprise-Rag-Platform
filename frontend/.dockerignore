@@ -1,0 +1,21 @@
+# Applies when frontend/ is the build context (`docker build frontend/`). The compose
+# service builds from the repository root instead, because the image also needs
+# docker/nginx.conf; the Dockerfile copies explicit paths, so node_modules and dist are
+# never copied into the image from either context. A root .dockerignore would be needed to
+# keep them out of the *transfer* for the compose build -- see docker/README.md.
+
+node_modules/
+dist/
+.vite/
+coverage/
+*.log
+
+# Machine-specific overrides. Vite reads `.env*` files at build time, and only the values
+# the build arg carries are wanted in the image.
+*.local
+.env
+
+# Only the builder reads these.
+Dockerfile
+.dockerignore
+README.md

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Response, status
 
-from app.api.deps import SessionDep, StorageDep, VectorStoreDep
+from app.api.deps import AdminDep, EditorDep, SessionDep, StorageDep, VectorStoreDep
 from app.schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseRead
 from app.services.knowledge_bases import KnowledgeBaseService
 
@@ -21,6 +21,7 @@ def create_knowledge_base(
     session: SessionDep,
     storage: StorageDep,
     vector_store: VectorStoreDep,
+    _editor: EditorDep,
 ) -> KnowledgeBaseRead:
     """Create a knowledge base. Names are unique across the platform."""
     knowledge_base = KnowledgeBaseService(session, storage, vector_store).create(payload)
@@ -58,6 +59,7 @@ def delete_knowledge_base(
     session: SessionDep,
     storage: StorageDep,
     vector_store: VectorStoreDep,
+    _admin: AdminDep,
 ) -> Response:
     """Delete a knowledge base and every document it holds."""
     KnowledgeBaseService(session, storage, vector_store).delete(knowledge_base_id)
