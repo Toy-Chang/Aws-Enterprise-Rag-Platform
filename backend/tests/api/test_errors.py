@@ -5,8 +5,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.errors import ConflictError, NotFoundError
 from app.core.config import Settings
+from app.core.errors import ConflictError, NotFoundError
 from app.main import create_app
 
 

@@ -1,9 +1,12 @@
-"""Application error types and the handlers that render them.
+"""HTTP rendering of application and framework failures.
 
 Every failure leaves the API as the same envelope, so clients can parse errors
 without special-casing each endpoint::
 
     {"request_id": "...", "error": {"code": "...", "message": "...", "details": {}}}
+
+The error types themselves live in :mod:`app.core.errors`, so services and
+repositories raise domain-meaningful failures without importing the web layer.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response
 
+from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.schemas.common import ErrorBody, ErrorResponse
 
@@ -28,56 +32,13 @@ _STATUS_CODES: dict[int, str] = {
     404: "NOT_FOUND",
     405: "METHOD_NOT_ALLOWED",
     409: "CONFLICT",
+    413: "PAYLOAD_TOO_LARGE",
     415: "UNSUPPORTED_MEDIA_TYPE",
     422: "UNPROCESSABLE_ENTITY",
     429: "TOO_MANY_REQUESTS",
     500: "INTERNAL_ERROR",
     503: "SERVICE_UNAVAILABLE",
 }
-
-
-class AppError(Exception):
-    """Base class for failures the platform raises deliberately.
-
-    Subclasses declare a stable machine-readable ``code`` and an HTTP
-    ``status_code`` so that domain failures map onto the public API contract.
-    """
-
-    status_code: int = 500
-    code: str = "INTERNAL_ERROR"
-    message: str = "An unexpected error occurred."
-
-    def __init__(
-        self, message: str | None = None, *, details: dict[str, Any] | None = None
-    ) -> None:
-        super().__init__(message or self.message)
-        if message is not None:
-            self.message = message
-        self.details: dict[str, Any] = dict(details or {})
-
-
-class BadRequestError(AppError):
-    """The caller sent a syntactically valid request that cannot be honoured."""
-
-    status_code = 400
-    code = "BAD_REQUEST"
-    message = "The request was invalid."
-
-
-class NotFoundError(AppError):
-    """The addressed resource does not exist or is not visible to the caller."""
-
-    status_code = 404
-    code = "NOT_FOUND"
-    message = "The requested resource was not found."
-
-
-class ConflictError(AppError):
-    """The request conflicts with the current state of the resource."""
-
-    status_code = 409
-    code = "CONFLICT"
-    message = "The request conflicts with the current state of the resource."
 
 
 def _request_id(request: Request) -> str | None:
