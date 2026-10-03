@@ -5,20 +5,23 @@ from __future__ import annotations
 import enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.chunk import Chunk
     from app.models.knowledge_base import KnowledgeBase
 
 
 class DocumentStatus(enum.StrEnum):
     """Lifecycle of a stored document.
 
-    Upload sets ``PENDING``. The ingestion pipeline added in the next phase drives
-    the remaining transitions as parsing, chunking and indexing complete.
+    Upload sets ``PENDING``; the ingestion pipeline moves a document to
+    ``PROCESSING`` while it parses, chunks and embeds, and finishes at ``READY`` or
+    ``FAILED``. ``READY`` is the only status that guarantees the document is
+    searchable, and ``FAILED`` carries the reason in ``error_message``.
     """
 
     PENDING = "pending"
@@ -47,5 +50,12 @@ class Document(Base, TimestampMixin):
     )
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
     version: Mapped[int] = mapped_column(default=1, nullable=False)
+    chunk_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="documents")
+    chunks: Mapped[list[Chunk]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

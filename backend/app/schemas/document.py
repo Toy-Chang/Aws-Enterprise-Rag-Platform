@@ -21,5 +21,7 @@ class DocumentRead(BaseModel):
     size_bytes: int
     status: DocumentStatus
     version: int
+    chunk_count: int
+    error_message: str | None
     created_at: datetime
     updated_at: datetime
