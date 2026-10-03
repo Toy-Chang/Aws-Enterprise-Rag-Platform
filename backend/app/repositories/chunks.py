@@ -49,3 +49,20 @@ class ChunkRepository:
             .order_by(Chunk.document_id, Chunk.chunk_index)
         )
         return list(self._session.scalars(statement))
+
+    def list_with_document_names(self, chunk_ids: Sequence[str]) -> list[tuple[Chunk, str]]:
+        """Return the given chunks paired with the name of their document.
+
+        Retrieval resolves search results through this method: the index holds
+        identifiers and vectors only, so the text a citation quotes, and the document it
+        belongs to, are read here.
+        """
+        if not chunk_ids:
+            return []
+
+        statement = (
+            select(Chunk, Document.name)
+            .join(Document, Document.id == Chunk.document_id)
+            .where(Chunk.id.in_(list(chunk_ids)))
+        )
+        return [(chunk, name) for chunk, name in self._session.execute(statement)]
