@@ -39,10 +39,15 @@ node_modules/
 coverage/
 
 # --- Terraform ---
+# Terraform: the downloaded providers and any state are environment-specific. The lock
+# file is deliberately NOT ignored -- it pins the provider versions a deployment used, and
+# it is the one Terraform artifact that belongs in version control.
 .terraform/
-.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
+# A tfvars file carries the database password. Only the example is committed.
+*.tfvars
+!*.tfvars.example
 crash.log
 crash.*.log
 *.tfvars

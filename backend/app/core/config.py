@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # Service identity.
     name: str = "aws-enterprise-rag-platform"
     display_name: str = "AWS Enterprise RAG Platform"
-    version: str = "0.1.0"
+    version: str = "1.0.0"
     environment: Environment = "local"
     api_version: str = "v1"
     api_v1_prefix: str = "/api/v1"

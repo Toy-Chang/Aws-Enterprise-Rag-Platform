@@ -23,11 +23,11 @@ from app.adapters import (
     build_storage,
     build_vector_store,
 )
+from app.aws.secrets import resolve_database_url
 from app.core.config import Settings, get_settings
 from app.core.db import create_db_engine, create_session_factory, init_db
 from app.core.logging import configure_logging, get_logger
 from app.core.metrics import MetricsRegistry
-from app.aws.secrets import resolve_database_url
 from app.repositories.queue import messages_from_lambda_event
 from app.services.ingestion_consumer import IngestionConsumer
 

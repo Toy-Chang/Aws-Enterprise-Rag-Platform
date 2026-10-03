@@ -13,13 +13,13 @@ AWS Enterprise RAG Platform 是一个企业内部知识库问答后端系统。
 
 系统围绕「知识库 - 文档 - 段落 - 检索 - 引用」构建核心链路，为企业内部文档检索与问答提供统一后端服务。项目重点关注 RAG 工程中的检索质量可测量性、引用可追溯性、无证据时拒答、摄取流水线的幂等与可恢复性、本地适配器与 AWS 适配器的可替换性，以及可测试性。
 
-当前实现完整覆盖本地可运行链路（摄取、检索、回答、引用、追踪、指标、评估、前端界面），并已完成 S3、Bedrock 嵌入、OpenSearch k-NN 三个数据适配器，以及 SQS 摄取队列与它的 Lambda 消费者；基础设施即代码与身份认证尚未实现，见 [项目边界](#项目边界--project-scope)。
+当前实现完整覆盖本地可运行链路（摄取、检索、回答、引用、追踪、指标、评估、前端界面），并已完成 S3、Bedrock 嵌入、OpenSearch k-NN 三个数据适配器，以及 SQS 摄取队列与它的 Lambda 消费者；基础设施即代码（Terraform 九个模块）与基于 Cognito 的身份认证、有序 RBAC 同样已实现，并通过静态校验与单元测试，但从未对真实 AWS 运行过，见 [项目边界](#项目边界--project-scope)。
 
 AWS Enterprise RAG Platform is an internal knowledge-base question-answering backend.
 
 The system is built around the flow of knowledge bases, documents, passages, retrieval and citations. It provides a unified backend for internal document search and answering, with emphasis on measurable retrieval quality, traceable citations, refusing to answer when no evidence is retrieved, idempotent and recoverable ingestion, swappable local and AWS adapters, and testability.
 
-The local path is complete and runnable end to end (ingestion, retrieval, answering, citations, traces, metrics, evaluation and an operator UI). Three data adapters are implemented (S3, Bedrock embeddings, OpenSearch k-NN) along with an SQS ingestion queue and its Lambda consumer. Infrastructure as code and authentication are not implemented; see [Project Scope](#项目边界--project-scope).
+The local path is complete and runnable end to end (ingestion, retrieval, answering, citations, traces, metrics, evaluation and an operator UI). Three data adapters are implemented (S3, Bedrock embeddings, OpenSearch k-NN) along with an SQS ingestion queue and its Lambda consumer. Infrastructure as code (a nine-module Terraform stack) and Cognito authentication with ordered RBAC are also implemented and pass static validation and unit tests, but none of them has ever run against live AWS; see [Project Scope](#项目边界--project-scope).
 
 ## 项目背景 | Business Background
 
@@ -802,11 +802,15 @@ HTTP 测试通过 `TestClient` 驱动真实应用与真实 SQLite 数据库，�
 
 下表区分**已验证**与**未验证**。未验证项一律标注为 NOT VERIFIED，不用「应该可以」代替证据。
 
+状态用词在全文保持一致：**IMPLEMENTED**（代码存在并接入组装根）· **TESTED**（有通过的自动化测试）· **STATICALLY VALIDATED**（`terraform validate`、`fmt -check`、`docker compose config` 一类静态检查）· **RUNTIME VERIFIED**（在本机真实运行过）· **NOT LIVE-AWS VERIFIED**（从未对真实 AWS 服务或真实 Cognito 用户池运行过）。表中的 `PASS` 属于前四类之一，括号里的限定词指明是哪一类。
+
+English: the same five words are used consistently throughout — IMPLEMENTED, TESTED, STATICALLY VALIDATED, RUNTIME VERIFIED and NOT LIVE-AWS VERIFIED. `PASS` below always means one of the first four, and the parenthetical states which one.
+
 | Component | Verification |
 | --- | --- |
 | Backend test suite | PASS (547 passed) |
 | Backend lint and formatting | PASS (ruff check, ruff format --check) |
-| Frontend tests | PASS |
+| Frontend tests | PASS (95 passed) |
 | Frontend typecheck and production build | PASS |
 | Upload → ingest → `ready` (real run) | PASS |
 | Query with citation and trace (real run) | PASS |
@@ -832,7 +836,7 @@ HTTP 测试通过 `TestClient` 驱动真实应用与真实 SQLite 数据库，�
 | Lambda handler consuming an API-queued document (real run, separate process) | PASS |
 | `502 QUEUE_UNAVAILABLE` when the queue is unreachable (real run) | PASS |
 | SQS against live AWS | **NOT VERIFIED** (no AWS account, `send_message` never called for real) |
-| Authentication and authorization | **NOT VERIFIED** (not written) |
+| Authentication and authorization, end to end | **IMPLEMENTED**, **TESTED**; **NOT LIVE-AWS VERIFIED** (no user pool exists, no real token has ever been issued) |
 | Reranker improvement | **INCONCLUSIVE** (identical metrics on the committed sample) |
 | Semantic retrieval quality | **NOT CLAIMED** (the default embedder is lexical) |
 
@@ -846,27 +850,28 @@ English summary: 547 backend tests, a green frontend suite, clean lint and forma
 backend/
   app/
     api/          routers, dependencies, request middleware, exception handlers
-    aws/          S3, Bedrock embeddings, OpenSearch and SQS adapters, Lambda entry point
+    aws/          S3, Bedrock, OpenSearch and SQS adapters, Cognito verifier, Secrets Manager, Lambda entry point
     core/         configuration, logging, metrics, database, error taxonomy
     models/       SQLAlchemy models: knowledge base, document, chunk
     rag/          ports and local adapters: embeddings, vector store, answer model, reranker
     repositories/ storage port and data access
     schemas/      Pydantic request and response models
+    security/     authentication port, ordered roles, the authorization policy
     services/     documents, ingestion, query, evaluation, worker
     adapters.py   the one place that decides which adapter each port gets
     main.py       composition root and lifespan
   tests/          pytest suite, mirroring the package layout
   pyproject.toml
+  Dockerfile      API image, plus a `lambda` stage reusing it for the consumer
 frontend/
   src/
     api/          typed client and endpoint wrappers
+    auth/         Cognito PKCE flow, session storage, the auth port
     components/   layout and state components
     features/     knowledge bases, query, evaluation, metrics pages
     lib/          formatting and async helpers
     test/         fixtures, setup, API stubs
-    security/     authentication port, roles, the authorization policy
-    aws/          also the Cognito token verifier and the Secrets Manager reader
-  Dockerfile      API image, plus a `lambda` stage reusing it for the consumer
+  Dockerfile      SPA build, served by nginx
 docs/
   architecture/decisions/   ADR 0001-0009
   deployment/aws.md         AWS configuration, IAM, verified and unverified list

@@ -15,7 +15,10 @@ import pytest
 
 from app.aws.secrets import SecretResolutionError, resolve_database_url
 
-SECRET_ARN = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:rag-platform-production-database-url-AbCdEf"
+SECRET_ARN = (
+    "arn:aws:secretsmanager:eu-west-1:123456789012:secret:"
+    "rag-platform-production-database-url-AbCdEf"
+)
 
 URL = "postgresql+psycopg://rag_admin:pw@db.example.internal:5432/rag"
 

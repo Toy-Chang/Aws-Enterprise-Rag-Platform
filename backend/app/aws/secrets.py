@@ -62,27 +62,22 @@ def resolve_database_url(
     except Exception as exc:
         # Whatever the SDK throws -- an access denial, a missing secret, a timeout -- the
         # process cannot continue, and the message has to name the secret to be actionable.
-        raise SecretResolutionError(
-            f"The secret '{secret_arn}' could not be read: {exc}"
-        ) from exc
+        raise SecretResolutionError(f"The secret '{secret_arn}' could not be read: {exc}") from exc
 
     payload = response.get("SecretString")
     if payload is None:
         raise SecretResolutionError(
-            f"The secret '{secret_arn}' holds no string value; the database URL is expected in a JSON document."
+            f"The secret '{secret_arn}' holds no string value; "
+            "the database URL is expected in a JSON document."
         )
 
     try:
         document = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise SecretResolutionError(
-            f"The secret '{secret_arn}' is not a JSON document."
-        ) from exc
+        raise SecretResolutionError(f"The secret '{secret_arn}' is not a JSON document.") from exc
 
     if not isinstance(document, dict):
-        raise SecretResolutionError(
-            f"The secret '{secret_arn}' is not a JSON object."
-        )
+        raise SecretResolutionError(f"The secret '{secret_arn}' is not a JSON object.")
 
     url = document.get(SECRET_URL_KEY)
     if not isinstance(url, str) or not url.strip():

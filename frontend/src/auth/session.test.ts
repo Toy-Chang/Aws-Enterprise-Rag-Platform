@@ -255,7 +255,7 @@ describe('getValidAccessToken', () => {
     vi.unstubAllEnvs()
     vi.stubEnv('VITE_COGNITO_DOMAIN', '')
     vi.stubEnv('VITE_COGNITO_CLIENT_ID', '')
-    const loaded = await loadAuthModules()
+    const loaded = await loadAuthModules({ allowDisabled: true })
     sessionStorage.setItem(STORAGE_KEY, storedSession())
 
     await expect(loaded.source.getValidAccessToken()).resolves.toBeNull()

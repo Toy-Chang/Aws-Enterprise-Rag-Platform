@@ -54,6 +54,9 @@ beforeEach(async () => {
   const loaded = await loadAuthModules()
   cognito = loaded.cognito
   source = loaded.source
+  if (!loaded.config) {
+    throw new Error('this suite requires authentication to be configured')
+  }
   config = loaded.config
 })
 
