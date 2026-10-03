@@ -16,7 +16,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.core.db import session_scope
+from app.rag import VectorStore
 from app.repositories.storage import DocumentStorage
+from app.services.ingestion import IngestionService
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -39,7 +41,8 @@ def get_db(request: Request) -> Iterator[Session]:
     unit of work back.
     """
     session_factory: sessionmaker[Session] = request.app.state.session_factory
-    yield from session_scope(session_factory)
+    with session_scope(session_factory) as session:
+        yield session
 
 
 def get_storage(request: Request) -> DocumentStorage:
@@ -48,7 +51,21 @@ def get_storage(request: Request) -> DocumentStorage:
     return storage
 
 
+def get_vector_store(request: Request) -> VectorStore:
+    """Return the configured vector index."""
+    vector_store: VectorStore = request.app.state.vector_store
+    return vector_store
+
+
+def get_ingestion(request: Request) -> IngestionService:
+    """Return the configured ingestion service."""
+    ingestion: IngestionService = request.app.state.ingestion
+    return ingestion
+
+
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 EngineDep = Annotated[Engine, Depends(get_engine)]
 SessionDep = Annotated[Session, Depends(get_db)]
 StorageDep = Annotated[DocumentStorage, Depends(get_storage)]
+VectorStoreDep = Annotated[VectorStore, Depends(get_vector_store)]
+IngestionDep = Annotated[IngestionService, Depends(get_ingestion)]
