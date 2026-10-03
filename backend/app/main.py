@@ -14,7 +14,14 @@ from app.api.routes import health, meta
 from app.core.config import Settings, get_settings
 from app.core.db import create_db_engine, create_session_factory, init_db
 from app.core.logging import configure_logging, get_logger
-from app.rag import HashingEmbeddingModel, InMemoryVectorStore
+from app.rag import (
+    AnswerModel,
+    BedrockAnswerModel,
+    ExtractiveAnswerModel,
+    HashingEmbeddingModel,
+    InMemoryVectorStore,
+    LexicalOverlapReranker,
+)
 from app.repositories.local_fs_storage import LocalFileSystemStorage
 from app.services.ingestion import IngestionService, rebuild_vector_index
 from app.services.worker import IngestionWorker
@@ -48,6 +55,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         backend=type(app.state.vector_store).__name__,
         dimensions=app.state.vector_store.dimensions,
         vectors=indexed,
+    )
+    # The active retrieval and generation adapters are reported at startup, so a
+    # deployment can see which implementation is answering instead of guessing.
+    logger.info(
+        "retrieval_configured",
+        embedder=type(app.state.embedder).__name__,
+        reranker=app.state.reranker.name if app.state.reranker is not None else None,
+        generator=app.state.answer_model.name,
+        generator_kind=app.state.answer_model.kind,
+        min_score=settings.retrieval_min_score,
+        top_k=settings.retrieval_top_k,
     )
 
     if settings.ingestion_worker_enabled:
@@ -95,6 +113,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.ingestion_worker = IngestionWorker(
         app.state.ingestion, poll_seconds=resolved.ingestion_poll_seconds
     )
+    # Which reranker and generator to use is decided here and nowhere else, so that no
+    # service has to branch on which backend is configured.
+    app.state.reranker = LexicalOverlapReranker() if resolved.rerank_enabled else None
+    app.state.answer_model = _build_answer_model(resolved)
 
     app.add_middleware(RequestContextMiddleware, header_name=resolved.request_id_header)
     register_exception_handlers(app)
@@ -104,6 +126,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(api_router, prefix=resolved.api_v1_prefix)
 
     return app
+
+
+def _build_answer_model(settings: Settings) -> AnswerModel:
+    """Return the answer generator the configuration asks for."""
+    if settings.generation_provider == "bedrock":
+        return BedrockAnswerModel(
+            model_id=settings.bedrock_model_id,
+            region=settings.bedrock_region,
+            max_tokens=settings.generation_max_tokens,
+            temperature=settings.generation_temperature,
+        )
+    return ExtractiveAnswerModel()
 
 
 app = create_app()

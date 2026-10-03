@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.core.db import session_scope
-from app.rag import VectorStore
+from app.rag import AnswerModel, EmbeddingModel, Reranker, VectorStore
 from app.repositories.storage import DocumentStorage
 from app.services.ingestion import IngestionService
 
@@ -63,9 +63,30 @@ def get_ingestion(request: Request) -> IngestionService:
     return ingestion
 
 
+def get_embedder(request: Request) -> EmbeddingModel:
+    """Return the configured embedding model."""
+    embedder: EmbeddingModel = request.app.state.embedder
+    return embedder
+
+
+def get_reranker(request: Request) -> Reranker | None:
+    """Return the configured reranker, or ``None`` when reranking is disabled."""
+    reranker: Reranker | None = request.app.state.reranker
+    return reranker
+
+
+def get_answer_model(request: Request) -> AnswerModel:
+    """Return the configured answer generator."""
+    answer_model: AnswerModel = request.app.state.answer_model
+    return answer_model
+
+
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 EngineDep = Annotated[Engine, Depends(get_engine)]
 SessionDep = Annotated[Session, Depends(get_db)]
 StorageDep = Annotated[DocumentStorage, Depends(get_storage)]
 VectorStoreDep = Annotated[VectorStore, Depends(get_vector_store)]
 IngestionDep = Annotated[IngestionService, Depends(get_ingestion)]
+EmbedderDep = Annotated[EmbeddingModel, Depends(get_embedder)]
+RerankerDep = Annotated[Reranker | None, Depends(get_reranker)]
+AnswerModelDep = Annotated[AnswerModel, Depends(get_answer_model)]
