@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ConflictError, NotFoundError
 from app.models import KnowledgeBase
+from app.rag import VectorStore
 from app.repositories.documents import DocumentRepository
 from app.repositories.knowledge_bases import KnowledgeBaseRepository
 from app.repositories.storage import DocumentStorage
@@ -18,11 +19,13 @@ from app.services.documents import DocumentService
 class KnowledgeBaseService:
     """Creates, reads and removes knowledge bases."""
 
-    def __init__(self, session: Session, storage: DocumentStorage) -> None:
+    def __init__(
+        self, session: Session, storage: DocumentStorage, vector_store: VectorStore
+    ) -> None:
         self._session = session
         self._knowledge_bases = KnowledgeBaseRepository(session)
         self._documents = DocumentRepository(session)
-        self._document_service = DocumentService(session, storage)
+        self._document_service = DocumentService(session, storage, vector_store)
 
     def create(self, payload: KnowledgeBaseCreate) -> KnowledgeBase:
         """Create a knowledge base.
