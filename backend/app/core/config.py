@@ -65,6 +65,25 @@ class Settings(BaseSettings):
     ingestion_poll_seconds: float = Field(default=0.5, gt=0)
     ingestion_batch_size: int = Field(default=10, ge=1)
 
+    # Retrieval. ``min_score`` is a policy rather than a property of the index: it
+    # decides when the platform says the knowledge base does not cover a question
+    # instead of answering from whatever came back. Its useful value depends on the
+    # embedding model, so it has to be revisited when the model changes.
+    retrieval_top_k: int = Field(default=5, ge=1, le=50)
+    retrieval_min_score: float = Field(default=0.1, ge=-1.0, le=1.0)
+    # Candidates fetched per requested passage when a reranker runs, so the reranker has
+    # something to choose between rather than only reordering the final list.
+    retrieval_candidate_multiplier: int = Field(default=4, ge=1, le=20)
+    rerank_enabled: bool = False
+    context_max_chars: int = Field(default=6000, ge=100)
+
+    # Answer generation.
+    generation_provider: Literal["local", "bedrock"] = "local"
+    bedrock_model_id: str = "amazon.nova-lite-v1:0"
+    bedrock_region: str = "us-east-1"
+    generation_max_tokens: int = Field(default=1024, ge=1)
+    generation_temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+
     # Observability.
     log_level: LogLevel = "INFO"
     log_format: LogFormat = "json"

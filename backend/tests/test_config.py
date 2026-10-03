@@ -96,6 +96,13 @@ def test_an_overlap_that_is_not_smaller_than_the_chunk_size_is_rejected(
         ("APP_MAX_UPLOAD_SIZE_BYTES", "0"),
         ("APP_INGESTION_POLL_SECONDS", "0"),
         ("APP_INGESTION_BATCH_SIZE", "0"),
+        ("APP_RETRIEVAL_TOP_K", "0"),
+        ("APP_RETRIEVAL_TOP_K", "51"),
+        ("APP_RETRIEVAL_MIN_SCORE", "1.5"),
+        ("APP_RETRIEVAL_CANDIDATE_MULTIPLIER", "0"),
+        ("APP_CONTEXT_MAX_CHARS", "10"),
+        ("APP_GENERATION_MAX_TOKENS", "0"),
+        ("APP_GENERATION_TEMPERATURE", "1.5"),
     ],
 )
 def test_out_of_range_ingestion_settings_are_rejected(
@@ -105,3 +112,43 @@ def test_out_of_range_ingestion_settings_are_rejected(
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_retrieval_defaults_are_local_friendly() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.retrieval_top_k == 5
+    assert settings.retrieval_min_score == 0.1
+    assert settings.retrieval_candidate_multiplier == 4
+    assert settings.context_max_chars == 6000
+    # Reranking is off until Phase 5 can measure whether it improves anything.
+    assert settings.rerank_enabled is False
+
+
+def test_generation_defaults_to_the_local_extractive_adapter() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.generation_provider == "local"
+    assert settings.bedrock_model_id == "amazon.nova-lite-v1:0"
+    assert settings.bedrock_region == "us-east-1"
+    assert settings.generation_max_tokens == 1024
+    assert settings.generation_temperature == 0.0
+
+
+def test_an_unknown_generation_provider_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_GENERATION_PROVIDER", "openai")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_the_generation_provider_can_be_switched_to_bedrock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_GENERATION_PROVIDER", "bedrock")
+    monkeypatch.setenv("APP_BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.generation_provider == "bedrock"
+    assert settings.bedrock_model_id == "amazon.nova-pro-v1:0"
