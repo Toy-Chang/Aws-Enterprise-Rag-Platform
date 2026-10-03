@@ -79,14 +79,31 @@ def _render(
 
 
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
-    """Render a deliberate application error."""
-    log = logger.error if exc.status_code >= 500 else logger.warning
-    log(
-        "application_error",
-        error_code=exc.code,
-        http_status=exc.status_code,
-        detail=str(exc),
-    )
+    """Render a deliberate application error.
+
+    A server-side failure is logged with its cause chain: when a generator fails
+    because an upstream service refused the call, the reason has to reach the logs or
+    the failure cannot be diagnosed. Client-side failures are logged as a warning
+    without a traceback, since a rejected request is not a defect in this service.
+    """
+    if exc.status_code >= 500:
+        logger.error(
+            "application_error",
+            error_code=exc.code,
+            http_status=exc.status_code,
+            error_type=type(exc).__name__,
+            detail=str(exc),
+            request_id=_request_id(request),
+            exc_info=exc,
+        )
+    else:
+        logger.warning(
+            "application_error",
+            error_code=exc.code,
+            http_status=exc.status_code,
+            detail=str(exc),
+            request_id=_request_id(request),
+        )
     return _render(
         request,
         status_code=exc.status_code,

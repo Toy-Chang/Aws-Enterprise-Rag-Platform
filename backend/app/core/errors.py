@@ -69,3 +69,15 @@ class UnsupportedMediaTypeError(AppError):
     status_code = 415
     code = "UNSUPPORTED_MEDIA_TYPE"
     message = "The document format is not supported."
+
+
+class GenerationFailedError(AppError):
+    """The configured answer generator could not produce an answer.
+
+    This is an upstream failure, not a bad request: the caller asked something the
+    platform accepted, and the model behind the port did not answer.
+    """
+
+    status_code = 502
+    code = "GENERATION_FAILED"
+    message = "The answer could not be generated."
