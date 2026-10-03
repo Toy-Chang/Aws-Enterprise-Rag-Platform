@@ -65,3 +65,43 @@ def test_get_settings_is_cached() -> None:
         assert get_settings() is get_settings()
     finally:
         get_settings.cache_clear()
+
+
+def test_ingestion_defaults_are_local_friendly() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.chunk_size_chars == 1200
+    assert settings.chunk_overlap_chars == 200
+    assert settings.embedding_dimensions == 256
+    assert settings.ingestion_worker_enabled is True
+    assert settings.ingestion_poll_seconds == 0.5
+    assert settings.ingestion_batch_size == 10
+
+
+def test_an_overlap_that_is_not_smaller_than_the_chunk_size_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_CHUNK_SIZE_CHARS", "500")
+    monkeypatch.setenv("APP_CHUNK_OVERLAP_CHARS", "500")
+
+    with pytest.raises(ValidationError, match="chunk_overlap_chars"):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("APP_CHUNK_SIZE_CHARS", "0"),
+        ("APP_EMBEDDING_DIMENSIONS", "4"),
+        ("APP_MAX_UPLOAD_SIZE_BYTES", "0"),
+        ("APP_INGESTION_POLL_SECONDS", "0"),
+        ("APP_INGESTION_BATCH_SIZE", "0"),
+    ],
+)
+def test_out_of_range_ingestion_settings_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, variable: str, value: str
+) -> None:
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
