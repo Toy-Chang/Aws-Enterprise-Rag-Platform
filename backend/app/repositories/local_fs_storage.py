@@ -30,6 +30,13 @@ class LocalFileSystemStorage:
         except OSError as exc:  # pragma: no cover - depends on the host filesystem
             raise DocumentStorageError(f"could not write object {key!r}") from exc
 
+    def read(self, key: str) -> bytes:
+        path = self._resolve(key)
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise DocumentStorageError(f"could not read object {key!r}") from exc
+
     def delete(self, key: str) -> None:
         path = self._resolve(key)
         try:

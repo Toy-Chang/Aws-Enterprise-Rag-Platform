@@ -26,6 +26,14 @@ class DocumentStorage(Protocol):
         """
         ...
 
+    def read(self, key: str) -> bytes:
+        """Return the content stored under ``key``.
+
+        Raises:
+            DocumentStorageError: if the object is missing or cannot be read.
+        """
+        ...
+
     def delete(self, key: str) -> None:
         """Remove the object stored under ``key``.
 
