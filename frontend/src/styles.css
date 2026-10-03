@@ -1,0 +1,495 @@
+/* One stylesheet, no framework.
+ *
+ * The UI is a handful of tables, forms and result panels, so a design system would be more
+ * dependency than design. Colours are variables so the dark scheme is one block, and the
+ * layout is a single column below 720px.
+ */
+
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --border: #dfe3e8;
+  --text: #1c2024;
+  --text-muted: #5b6470;
+  --accent: #14508c;
+  --accent-soft: #e8f0fa;
+  --ok: #17683f;
+  --ok-soft: #e4f4ea;
+  --warn: #8a5300;
+  --warn-soft: #fdf3e0;
+  --error: #a4262c;
+  --error-soft: #fdeaea;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --surface: #1c2024;
+    --border: #2e343a;
+    --text: #e8eaed;
+    --text-muted: #9aa4b0;
+    --accent: #7cb0e8;
+    --accent-soft: #1d2c3d;
+    --ok: #74d0a0;
+    --ok-soft: #16301f;
+    --warn: #e0b070;
+    --warn-soft: #33270f;
+    --error: #f09494;
+    --error-soft: #3a1d1d;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.25;
+  margin: 0 0 0.5rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+}
+
+h3 {
+  font-size: 1rem;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* Layout ------------------------------------------------------------------ */
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 3rem;
+}
+
+.app__header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0 1rem;
+}
+
+.app__brand {
+  display: flex;
+  flex-direction: column;
+}
+
+.app__title {
+  font-size: 1.25rem;
+  font-weight: 650;
+}
+
+.app__subtitle,
+.app__footer {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.nav {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1.25rem;
+}
+
+.nav__link {
+  padding: 0.5rem 0.85rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+
+.nav__link--active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.app__footer {
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+/* Surfaces ---------------------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  margin-bottom: 1.25rem;
+}
+
+.card__header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.card__hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 0 0 0.75rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+/* Controls ---------------------------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1 1 12rem;
+}
+
+.field label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  width: 100%;
+}
+
+textarea {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  resize: vertical;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.button {
+  font: inherit;
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.button--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.button--primary:hover:not(:disabled) {
+  color: #fff;
+  filter: brightness(1.08);
+}
+
+.button--danger:hover:not(:disabled) {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.button--small {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+/* Badges ------------------------------------------------------------------ */
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.badge--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.badge--error {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+.badge--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.badge--muted {
+  background: var(--accent-soft);
+  color: var(--text-muted);
+}
+
+/* Tables ------------------------------------------------------------------ */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+td.numeric,
+th.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+/* States ------------------------------------------------------------------ */
+
+.state {
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  margin: 0.5rem 0;
+}
+
+.state--loading,
+.state--empty {
+  color: var(--text-muted);
+  background: var(--surface);
+}
+
+.state--error {
+  background: var(--error-soft);
+  border-color: var(--error);
+}
+
+.state__title {
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+}
+
+.state--error .state__title {
+  color: var(--error);
+}
+
+.state__body {
+  color: var(--text-muted);
+}
+
+.state__details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0 0 0.6rem;
+  font-size: 0.85rem;
+}
+
+.state__details dt {
+  color: var(--text-muted);
+}
+
+.state__details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.state__fields {
+  margin: 0 0 0.6rem;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+}
+
+/* Results ----------------------------------------------------------------- */
+
+.answer {
+  white-space: pre-wrap;
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  margin: 0 0 0.85rem;
+}
+
+.citations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.citation {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+  background: var(--surface);
+}
+
+.citation__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.citation__marker {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.citation__snippet {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+}
+
+.trace {
+  display: grid;
+  gap: 0.5rem 1.25rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  font-size: 0.85rem;
+}
+
+.trace__group h4 {
+  margin: 0 0 0.2rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.trace__group dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.1rem 0.6rem;
+  margin: 0;
+}
+
+.trace__group dt {
+  color: var(--text-muted);
+}
+
+.trace__group dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+}
+
+.tile__label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.tile__value {
+  font-size: 1.35rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile__hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.issues {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+
+.saved {
+  color: var(--ok);
+  font-size: 0.85rem;
+}

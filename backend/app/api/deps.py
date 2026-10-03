@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.core.db import session_scope
+from app.core.metrics import MetricsRegistry
 from app.rag import AnswerModel, EmbeddingModel, Reranker, VectorStore
 from app.repositories.storage import DocumentStorage
 from app.services.ingestion import IngestionService
@@ -81,6 +82,12 @@ def get_answer_model(request: Request) -> AnswerModel:
     return answer_model
 
 
+def get_metrics(request: Request) -> MetricsRegistry:
+    """Return the metrics registry bound to the running application instance."""
+    metrics: MetricsRegistry = request.app.state.metrics
+    return metrics
+
+
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 EngineDep = Annotated[Engine, Depends(get_engine)]
 SessionDep = Annotated[Session, Depends(get_db)]
@@ -90,3 +97,4 @@ IngestionDep = Annotated[IngestionService, Depends(get_ingestion)]
 EmbedderDep = Annotated[EmbeddingModel, Depends(get_embedder)]
 RerankerDep = Annotated[Reranker | None, Depends(get_reranker)]
 AnswerModelDep = Annotated[AnswerModel, Depends(get_answer_model)]
+MetricsDep = Annotated[MetricsRegistry, Depends(get_metrics)]

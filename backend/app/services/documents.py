@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import NotFoundError, UnsupportedMediaTypeError
 from app.core.logging import get_logger
+from app.ingestion.parsers import PARSERS
 from app.models import Chunk, Document, DocumentStatus
 from app.rag import VectorStore
 from app.repositories.chunks import ChunkRepository
@@ -18,8 +19,10 @@ from app.repositories.storage import DocumentStorage, DocumentStorageError
 
 logger = get_logger(__name__)
 
-#: Document formats the ingestion pipeline can parse.
-SUPPORTED_EXTENSIONS = frozenset({".pdf", ".md", ".markdown", ".txt"})
+#: Document formats the ingestion pipeline can parse. Derived from the parser registry
+#: rather than written out again, so that adding a parser cannot leave upload rejecting
+#: a format the pipeline could have handled.
+SUPPORTED_EXTENSIONS = frozenset(PARSERS)
 
 
 class DocumentService:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Sequence
 from uuid import uuid4
 
@@ -12,6 +13,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
+from app.core.metrics import MetricsRegistry
+from app.core.timing import elapsed_ms
 from app.ingestion import ChunkDraft, DocumentParseError, chunk_document, parse_document
 from app.models import Chunk, Document, DocumentStatus
 from app.rag import EmbeddingModel, VectorRecord, VectorStore
@@ -39,11 +42,13 @@ class IngestionService:
         embedder: EmbeddingModel,
         vector_store: VectorStore,
         settings: Settings,
+        metrics: MetricsRegistry,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
         self._embedder = embedder
         self._vector_store = vector_store
+        self._metrics = metrics
         self._chunk_size = settings.chunk_size_chars
         self._chunk_overlap = settings.chunk_overlap_chars
         self._batch_size = settings.ingestion_batch_size
@@ -69,10 +74,13 @@ class IngestionService:
         # Runs are serialised. The local adapters share one SQLite database, where
         # concurrent writers would only contend; the AWS consumer sets its own
         # concurrency.
+        started = time.perf_counter()
         with self._run_lock:
             try:
-                self._ingest(knowledge_base_id, document_id)
+                chunks = self._ingest(knowledge_base_id, document_id)
             except Exception as exc:
+                self._metrics.increment("ingestion.failed")
+                self._metrics.observe("ingestion", elapsed_ms(started))
                 logger.exception(
                     "document_ingestion_failed",
                     document_id=document_id,
@@ -82,6 +90,10 @@ class IngestionService:
                     self._record_failure(document_id, _public_message(exc))
                 except Exception:
                     logger.exception("document_failure_not_recorded", document_id=document_id)
+            else:
+                self._metrics.increment("ingestion.succeeded")
+                self._metrics.increment("ingestion.chunks.total", chunks)
+                self._metrics.observe("ingestion", elapsed_ms(started))
 
     def recover_interrupted(self) -> int:
         """Return documents left mid-ingestion by a crash to the pending queue.
@@ -114,7 +126,8 @@ class IngestionService:
             ).all()
         return [(row[0], row[1]) for row in rows]
 
-    def _ingest(self, knowledge_base_id: str, document_id: str) -> None:
+    def _ingest(self, knowledge_base_id: str, document_id: str) -> int:
+        """Run the pipeline for one document and return how many chunks were stored."""
         with session_scope(self._session_factory) as session:
             document = session.get(Document, document_id)
             if document is None or document.knowledge_base_id != knowledge_base_id:
@@ -151,6 +164,7 @@ class IngestionService:
             chunk_count=len(records),
             notes=list(parsed.notes),
         )
+        return len(records)
 
     def _store_chunks(
         self,

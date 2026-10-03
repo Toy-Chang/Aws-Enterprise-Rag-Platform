@@ -3,13 +3,15 @@
 Cloud-native enterprise knowledge retrieval and Retrieval-Augmented Generation (RAG)
 platform designed around AWS services.
 
-> **Status — Phase 4: query pipeline.**
-> Knowledge base management, document upload, the ingestion pipeline (parsing,
-> structure-preserving chunking, embeddings, vector indexing) and the query pipeline
-> (retrieval, relevance threshold, context construction, grounded answers with citations
-> and a per-stage trace) are implemented and tested. Evaluation, the frontend and every
-> AWS adapter are **not implemented yet**. Answer generation runs on a local extractive
-> adapter unless Amazon Bedrock is configured. See [Roadmap](#roadmap) and
+> **Status — Phase 5: observability and evaluation.**
+> Knowledge base management, document upload, the ingestion pipeline, the query pipeline
+> (retrieval, relevance threshold, grounded answers with citations and a per-stage trace),
+> in-process metrics and a labelled-dataset evaluation harness are implemented and tested.
+> The frontend and every AWS adapter are **not implemented yet**. Answer generation runs on
+> a local extractive adapter unless Amazon Bedrock is configured. Phase 5 also measured the
+> local model's relevance scores and found that they cannot separate a relevant question from
+> an unrelated one — see
+> [Retrieval and answer quality](#retrieval-and-answer-quality). See [Roadmap](#roadmap) and
 > [What is not implemented yet](#what-is-not-implemented-yet).
 
 ---
@@ -33,9 +35,9 @@ This platform is the target design for that problem:
   instead of inventing an answer;
 - every request is observable — latency, retrieval behaviour, token usage, failures.
 
-## What works today (Phase 4)
+## What works today (Phase 5)
 
-Everything in this list is implemented and covered by the 194-test suite.
+Everything in this list is implemented and covered by the 282-test suite.
 
 ### Platform foundation
 
@@ -122,10 +124,59 @@ Everything in this list is implemented and covered by the 194-test suite.
   implements the same port for Amazon Bedrock's Converse API and is selected with
   `APP_GENERATION_PROVIDER=bedrock` (it needs the optional `aws` extra).
 - **Reranking behind a `Reranker` port**, implemented by a lexical-overlap reranker and
-  **disabled by default** until Phase 5 measures whether it improves anything.
+  **disabled by default**. Running the sample dataset with it enabled produces identical
+  numbers, because the baseline already ranks the relevant chunk first — the sample is at its
+  ceiling and cannot decide whether the reranker earns its place, so it stays off until a
+  dataset where the baseline is not at its ceiling says otherwise.
 - **A per-stage trace**: candidate counts, what cleared the threshold, what reached the
   generator, context size, reranker and generator names, token usage and per-stage
   durations, all correlated by request id.
+
+### Observability
+
+- **`GET /api/v1/metrics`** returns every counter and latency summary this process has
+  recorded: requests by route template and status class, ingestion outcomes and chunk counts,
+  query outcomes, retrieval candidate and selection totals, generation token totals, and
+  per-stage latency percentiles.
+- **Latency percentiles are nearest-rank** over a bounded window of recent samples, with
+  `observed` and `retained` reported beside each summary so it is clear when the window
+  rather than the traffic is the limit. Nothing is aggregated across replicas and nothing
+  survives a restart; the deployment's CloudWatch metrics stay the record.
+- **A stage that never ran has no latency rather than a zero one.** A question answered
+  `insufficient_evidence` records no `generation` sample at all, which turns the query
+  pipeline's central invariant into something visible in the metrics.
+- **Metric labels are route templates, never concrete paths**, so a caller cannot invent
+  unbounded series by inventing identifiers, and changing the API version prefix does not
+  split every counter.
+- **Structured logs alongside the numbers**: one access record per request correlated by
+  request id, an `application_error` record carrying the cause chain for 5xx failures, and
+  `evaluation_completed` summarising each evaluation run.
+
+### Evaluation
+
+- **`POST /api/v1/evaluations`** takes a corpus, a set of questions and explicit relevance
+  labels, ingests the corpus into a temporary knowledge base, asks every question through the
+  same query service the API serves, and returns the metrics.
+- **The dataset carries its own corpus**, so a run does not depend on what is already
+  ingested, two runs are comparable, and nothing is left behind: the temporary knowledge base
+  and its stored documents are removed before the response is returned.
+- **Labels are a document plus a snippet**, not chunk identifiers, because chunk identifiers
+  change on re-ingestion and a dataset written against them would rot silently. A snippet
+  that resolves to no chunk is reported in `issues` and leaves the question unscorable rather
+  than being scored as a retrieval miss.
+- **Standard retrieval metrics, correctly defined**: `recall_at_k`, `precision_at_k` (divided
+  by `k`, by convention), `hit_rate_at_k`, `mrr` and `ndcg_at_k` with binary gains and an
+  ideal ranking built from every labelled-relevant chunk. Plus `citation_precision` and
+  `citation_recall`, which ask whether the chunks an answer cited are the ones the labels mark
+  relevant.
+- **Nothing is invented to fill a gap.** No faithfulness, groundedness or hallucination metric
+  is reported, because judging an answer's content needs human or model judgement. A metric
+  whose denominator is zero raises rather than returning zero, so an unanswerable question has
+  no recall instead of a recall of `0.0`, and a rate with no observations is `null`.
+- **The threshold a run used is reported with its results**, and can be overridden per
+  request, so a retrieval policy can be compared rather than guessed at.
+- **A committed sample dataset** at `evaluation/datasets/sample.json`, run by the test suite
+  as written, so a dataset that stops being runnable fails the build.
 
 ### Persistence and storage
 
@@ -187,6 +238,18 @@ context assembly (character budget, whole passages, [1]…[n] markers)
 AnswerModel port ──▶ ExtractiveAnswerModel           (→ BedrockAnswerModel: Amazon Bedrock)
   ▼
 answer + citations + per-stage trace
+  │
+  ├──▶ metrics registry ──▶ GET /api/v1/metrics   (counters, latency windows)
+  └──▶ structured logs    ──▶ request id, stage durations, outcomes
+
+POST /evaluations
+  │  corpus + labelled questions
+  ▼
+temporary knowledge base ──▶ ingest the corpus ──▶ ask every question
+  ▼
+standard retrieval metrics from the labels ──▶ per-question report + issues
+  ▼
+temporary knowledge base removed
 ```
 
 Layering rules the code follows:
@@ -201,6 +264,7 @@ Layering rules the code follows:
   backend is configured.
 
 Recorded in
+[ADR 0005](docs/architecture/decisions/0005-observability-and-evaluation.md),
 [ADR 0004](docs/architecture/decisions/0004-query-pipeline.md),
 [ADR 0003](docs/architecture/decisions/0003-ingestion-and-retrieval-adapters.md),
 [ADR 0002](docs/architecture/decisions/0002-persistence-and-storage.md) and
@@ -224,10 +288,12 @@ Recorded in
 | Asynchronous ingestion | AWS Lambda + queue (local polling worker) | worker **in use**, AWS adapter planned |
 | Answer generation | Amazon Bedrock (local extractive adapter by default) | both adapters **implemented**; the Bedrock one is not exercised against a live endpoint |
 | Reranking | Lexical overlap locally, disabled by default | port and adapter **in use**; a learned reranker is planned |
+| Metrics | In-process counters and latency windows, exposed as JSON | **in use**; CloudWatch export planned — Phase 7 |
+| Evaluation | Labelled-dataset harness reporting standard retrieval metrics | **in use** |
 | Frontend | React + TypeScript | planned — Phase 6 |
 | Document storage | Amazon S3 (behind the existing storage port) | planned |
 | Authentication | Amazon Cognito | planned |
-| Observability | Amazon CloudWatch | planned — Phase 5 |
+| Observability | Amazon CloudWatch (structured logs are CloudWatch-ready today) | logs **in use**, metrics export planned — Phase 7 |
 | Secrets | AWS Secrets Manager | planned |
 | Infrastructure as code | Terraform | planned — Phase 7 |
 
@@ -246,9 +312,11 @@ aws-enterprise-rag-platform/
 │   │   │   ├── router.py              # versioned API assembly
 │   │   │   └── routes/
 │   │   │       ├── documents.py       # upload, list, metadata, chunks, reprocess
+│   │   │       ├── evaluations.py     # run a labelled dataset and score it
 │   │   │       ├── health.py          # /health, /health/ready
 │   │   │       ├── knowledge_bases.py # create, list, get, delete
 │   │   │       ├── meta.py            # /
+│   │   │       ├── metrics.py         # counters and latency summaries
 │   │   │       └── query.py           # ask a question about a knowledge base
 │   │   ├── core/
 │   │   │   ├── config.py              # environment-driven Settings
@@ -256,7 +324,13 @@ aws-enterprise-rag-platform/
 │   │   │   ├── db.py                  # engine, session factory, SQLite pragmas
 │   │   │   ├── errors.py              # AppError hierarchy
 │   │   │   ├── logging.py             # structlog configuration
+│   │   │   ├── metrics.py             # counters + bounded latency windows
+│   │   │   ├── statistics.py          # nearest-rank percentiles and summaries
 │   │   │   └── timing.py              # stage durations reported in the query trace
+│   │   ├── evaluation/
+│   │   │   ├── dataset.py             # corpus, questions, labels and their rules
+│   │   │   ├── metrics.py             # recall, precision, MRR, nDCG, citations
+│   │   │   └── report.py              # what a run produced
 │   │   ├── ingestion/
 │   │   │   ├── chunking.py            # structure-preserving windows + offsets
 │   │   │   └── parsers.py             # PDF, Markdown and text extraction
@@ -275,16 +349,20 @@ aws-enterprise-rag-platform/
 │   │   ├── repositories/              # SQLAlchemy repositories, storage port + adapter
 │   │   ├── schemas/                   # request and response models
 │   │   └── services/                  # use cases: documents, knowledge bases,
-│   │                                  # ingestion, worker, retrieval, query
+│   │                                  # ingestion, worker, retrieval, query, evaluation
 │   ├── tests/
 │   │   ├── conftest.py                # per-test database, storage dir, ingestion helper
 │   │   ├── test_config.py
 │   │   ├── test_logging.py
+│   │   ├── test_metrics.py            # counters and latency windows
+│   │   ├── test_statistics.py         # nearest-rank percentiles
 │   │   ├── api/                       # HTTP tests + shared upload and query helpers
+│   │   ├── evaluation/                # retrieval metrics and dataset rules
 │   │   ├── ingestion/                 # parser and chunker tests + a PDF builder
 │   │   └── rag/                       # embeddings, index, reranking, generation
 │   └── pyproject.toml
-├── docs/architecture/decisions/        # ADR 0001, 0002, 0003
+├── evaluation/datasets/               # labelled datasets the API can run
+├── docs/architecture/decisions/        # ADR 0001 ... 0005
 ├── scripts/bootstrap-backend.sh
 ├── .env.example
 ├── .gitignore
@@ -440,6 +518,32 @@ No step uses a model's own knowledge, and no step invents evidence. The reasonin
 these choices, including why the citation list is not parsed out of the model's output, is
 in [ADR 0004](docs/architecture/decisions/0004-query-pipeline.md).
 
+## How an evaluation runs
+
+1. `POST /api/v1/evaluations` validates the payload and builds a dataset, rejecting one that
+   could not be scored honestly — a label naming a document the corpus does not contain, an
+   answerable question that labels nothing, an unanswerable one that labels something.
+2. It creates a temporary knowledge base. The name is generated, so an evaluation cannot
+   collide with a real knowledge base or with a previous run's leftovers.
+3. It uploads the corpus and commits, because ingestion runs in its own sessions and an
+   uncommitted row is invisible to them.
+4. It ingests each document through the same `IngestionService` the worker uses, then re-reads
+   the documents to see what actually happened rather than trusting what it just wrote.
+5. It resolves each label to the chunks whose text contains its snippet. A label that
+   resolves to nothing becomes an issue and leaves its question unscorable, and a document
+   that failed to ingest is reported the same way — a broken dataset is a result about the
+   dataset, not a server error.
+6. It asks every question through the same `QueryService` the query endpoint uses, with the
+   requested `k` and `min_score`, and computes the retrieval and citation metrics from the
+   labels.
+7. It removes the temporary knowledge base — and the stored documents with it — before
+   returning, then reports what it measured, under which policy, with the per-question detail.
+
+Metrics that cannot be computed are `null` rather than zero, and rates with no observations
+are `null` rather than `1.0`. No faithfulness or hallucination metric is reported at all,
+because nothing here can judge an answer's content — see
+[ADR 0005](docs/architecture/decisions/0005-observability-and-evaluation.md).
+
 ## API
 
 Infrastructure endpoints live at the root; everything else is versioned.
@@ -460,6 +564,8 @@ Infrastructure endpoints live at the root; everything else is versioned.
 | `POST` | `/api/v1/knowledge-bases/{id}/documents/{document_id}/reprocess` | Re-run ingestion |
 | `DELETE` | `/api/v1/knowledge-bases/{id}/documents/{document_id}` | Delete a document |
 | `POST` | `/api/v1/knowledge-bases/{id}/query` | Ask a question, answered from the knowledge base |
+| `POST` | `/api/v1/evaluations` | Run a labelled dataset through the pipeline and score it |
+| `GET` | `/api/v1/metrics` | Counters and latency summaries for this process |
 
 ### Create a knowledge base
 
@@ -582,13 +688,74 @@ curl -s -X POST \
 ```
 
 `answer_kind` says whether a model wrote the answer. With the default local adapter it is
-`extractive`: the passages come back verbatim under their markers. A question the
-knowledge base does not cover is answered differently, not guessed at:
+`extractive`: the passages come back verbatim under their markers. A question that shares no
+vocabulary with anything indexed is answered differently, not guessed at:
 
 ```json
 {"outcome": "insufficient_evidence", "answer": null, "answer_kind": null,
  "citations": [], "usage": {"input_tokens": null, "output_tokens": null},
  "trace": {"retrieval": {"candidates": 3, "above_threshold": 0, "min_score": 0.1}}}
+```
+
+### Measure retrieval and answers
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/v1/evaluations \
+  -H 'Content-Type: application/json' \
+  --data-binary @evaluation/datasets/sample.json
+```
+```json
+{
+  "dataset": "platform-runbooks-smoke",
+  "temporary_knowledge_base_id": "b304307e60ed472eb566b34dbca08444",
+  "k": 5,
+  "min_score": 0.1,
+  "documents": 5,
+  "chunks": 19,
+  "total_questions": 6,
+  "answerable": 5,
+  "unanswerable": 1,
+  "retrieval": {
+    "questions": 5, "k": 5, "recall_at_k": 1.0, "precision_at_k": 0.2,
+    "hit_rate_at_k": 1.0, "mrr": 1.0, "ndcg_at_k": 1.0
+  },
+  "answers": {
+    "answered": 6, "insufficient_evidence": 0, "answerable_answered": 1.0,
+    "unanswerable_abstained": 0.0, "citation_precision": 0.26, "citation_recall": 1.0
+  },
+  "latency": {
+    "retrieval_ms": {"count": 6, "mean": 0.46, "minimum": 0.35, "p50": 0.4, "p95": 0.903, "maximum": 0.903},
+    "generation_ms": {"count": 6, "mean": 0.004, "minimum": 0.002, "p50": 0.004, "p95": 0.005, "maximum": 0.005},
+    "total_ms": {"count": 6, "mean": 0.726, "minimum": 0.61, "p50": 0.7, "p95": 1.185, "maximum": 1.185}
+  },
+  "issues": [],
+  "per_question": [
+    {
+      "id": "credential-rotation",
+      "question": "How often do database credentials rotate?",
+      "answerable": true, "outcome": "answered", "answer_kind": "extractive",
+      "citations": 5, "relevant_chunks": 1, "retrieved_chunks": 5, "matched_chunks": 1,
+      "recall_at_k": 1.0, "precision_at_k": 0.2, "reciprocal_rank": 1.0, "ndcg_at_k": 1.0,
+      "citation_precision": 0.2, "citation_recall": 1.0,
+      "retrieval_ms": 0.35, "generation_ms": 0.003, "total_ms": 0.66, "issues": []
+    }
+  ]
+}
+```
+
+The whole report is returned; one question is shown here to keep the example readable.
+`precision_at_k` of `0.2` is the definition rather than a retrieval problem — each question
+has one labelled-relevant chunk and precision divides by `k = 5` — and
+`unanswerable_abstained` of `0.0` is a real finding about the local model, explained under
+[Retrieval and answer quality](#retrieval-and-answer-quality).
+
+Run it again with a stricter threshold to see what the policy costs and buys:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/v1/evaluations \
+  -H 'Content-Type: application/json' \
+  --data-binary @evaluation/datasets/sample.json | python -c "import json,sys; d=json.load(sys.stdin); d['min_score']=0.35; print(json.dumps(d))" \
+  | curl -s -X POST http://127.0.0.1:8000/api/v1/evaluations -H 'Content-Type: application/json' --data-binary @-
 ```
 
 ## Error contract
@@ -614,6 +781,7 @@ Every non-successful response uses one envelope:
 | 413 | `PAYLOAD_TOO_LARGE` | upload above `APP_MAX_UPLOAD_SIZE_BYTES` |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | `UnsupportedMediaTypeError` — a format outside PDF/Markdown/TXT |
 | 422 | `UNPROCESSABLE_ENTITY` | request validation, with per-field detail in `details.errors` |
+| 422 | `INVALID_EVALUATION_DATASET` | `InvalidEvaluationDatasetError` — the dataset references a document it does not contain, or contradicts itself |
 | 500 | `INTERNAL_ERROR` | unexpected exception — logged in full, reported generically |
 | 502 | `GENERATION_FAILED` | `GenerationFailedError` — the configured answer generator could not produce an answer |
 
@@ -652,26 +820,78 @@ Two local adapters stand in for hosted models, and both are described by what th
   wrote the text.
 
 Both exist so the platform runs end to end, offline and deterministically, and so that
-retrieval and citation behaviour can be asserted exactly. Neither is a claim of quality,
-and no quality metric is reported anywhere in this repository. `BedrockAnswerModel`
-implements the generation port for the AWS deployment, and a Bedrock embedding model
-replaces the hashing one in Phase 7.
+retrieval and citation behaviour can be asserted exactly. Neither is a claim of quality.
+`BedrockAnswerModel` implements the generation port for the AWS deployment, and a Bedrock
+embedding model replaces the hashing one in Phase 7.
 
 Two settings are policies rather than properties of the code, and both have to be
 revisited when the embedding model changes:
 
-- `APP_RETRIEVAL_MIN_SCORE` defaults to `0.1`, which suits the local lexical model. A
-  semantic model produces a different score distribution, so the same number would mean
-  something else.
+- `APP_RETRIEVAL_MIN_SCORE` defaults to `0.1`. A semantic model produces a different score
+  distribution, so the same number would mean something else — and the measurement below
+  shows that no value of it turns this model into a relevance filter.
 - `APP_RERANK_ENABLED` defaults to `false`. The lexical-overlap reranker is implemented and
   tested, but nothing here has measured that it improves retrieval, and shipping it on by
-  default would be exactly that claim. Phase 5 measures it against the unranked baseline.
+  default would be exactly that claim. The evaluation endpoint is what measures it.
 
 The Bedrock generator is **implemented and unit-tested against a stubbed client, but has
 never been exercised against a live Bedrock endpoint from this repository**: that needs AWS
 credentials and account access to a model. What is verified is the request it builds, the
 response it parses, the failures it translates into a `502`, and that configuration selects
 it — not that a real call succeeds.
+
+### What the evaluation measured
+
+`evaluation/datasets/sample.json` is five runbook documents, five questions whose labels
+quote those runbooks, and one question about the company holiday schedule that the corpus
+does not answer. The per-question top candidate scores, from a real run against the local
+lexical model:
+
+| question | answerable | best candidate score |
+|---|---|---|
+| encryption-at-rest | yes | 0.6940 |
+| sev1-acknowledgement | yes | 0.6080 |
+| snapshot-retention | yes | 0.5015 |
+| production-access-approval | yes | 0.4186 |
+| **holiday-schedule** | **no** | **0.3146** |
+| credential-rotation | yes | **0.2578** |
+
+The unrelated question scores **above** a genuinely relevant one, and the run at the default
+threshold answers it: `unanswerable_abstained` is `0.0`. This is not a bug in the harness or a
+tuning oversight — the score measures shared vocabulary, function words are shared
+vocabulary, and no threshold can separate the two ranges because they overlap.
+
+The threshold still moves the trade-off, and the endpoint reports both sides of it. The same
+dataset at `min_score = 0.35`:
+
+| | default `0.1` | `0.35` |
+|---|---|---|
+| `answerable_answered` | 1.0 | 0.8 |
+| `unanswerable_abstained` | 0.0 | 1.0 |
+| `citation_precision` | 0.26 | 0.875 |
+| `recall_at_k` | 1.0 | 0.8 |
+
+Refusing the unrelated question is possible; doing it without also refusing an answerable one
+is not, with this model. What the thresholds do buy is cleaner citations, because a higher
+threshold keeps irrelevant passages out of the context.
+
+Two things this does **not** mean. It does not mean the platform invents answers: the
+`insufficient_evidence` outcome is reached when nothing clears the threshold, and with the
+extractive generator a false positive is a verbatim passage that does not answer the
+question. It also does not mean a generative model would behave the same — an irrelevant
+context is exactly the input on which a model can produce an unsupported answer, which is why
+`answer_kind` is reported and why the reasoning here is in
+[ADR 0005](docs/architecture/decisions/0005-observability-and-evaluation.md). Closing the gap
+needs semantic embeddings and a re-measurement, not a different default. **No quality metric
+is claimed anywhere in this repository beyond the numbers on this page, which describe one
+six-question sample.**
+
+The reranker is the other thing this dataset cannot settle. `APP_RERANK_ENABLED=true` run
+against the same sample returns the same numbers to the digit — `recall_at_k 1.0`,
+`mrr 1.0`, `ndcg_at_k 1.0`, `citation_precision 0.26` — because the unranked baseline already
+puts the relevant chunk first, so there is no headroom for a reranker to recover. That is an
+inconclusive measurement, not a positive one, and it is why the reranker stays off: the
+endpoint is how to repeat it on a dataset where the baseline is not at its ceiling.
 
 ## Observability
 
@@ -709,10 +929,64 @@ A question with no supporting evidence is not a failure, so it is logged as info
 upstream service actually said; a client-side failure (4xx) is a warning without a
 traceback, since a rejected request is not a defect in this service.
 
+### The numbers, from `GET /api/v1/metrics`
+
+Logs answer "what happened to this request"; the metrics endpoint answers "how is this
+process doing". After the two evaluation runs above, it reports:
+
+```json
+{
+  "window": 1024,
+  "counters": {
+    "evaluation.runs": 2,
+    "evaluation.questions.total": 12,
+    "http.requests.total": 6,
+    "http.responses.2xx": 5,
+    "http.route./evaluations": 2,
+    "http.route./health": 1,
+    "http.route./knowledge-bases": 1,
+    "http.route./metrics": 1,
+    "ingestion.chunks.total": 38,
+    "ingestion.succeeded": 10,
+    "query.answered": 10,
+    "query.insufficient_evidence": 2,
+    "retrieval.candidates.total": 60,
+    "retrieval.selected.total": 32
+  },
+  "latencies": {
+    "evaluation": {"observed": 2, "retained": 2, "mean_ms": 24.5, "p50_ms": 23.7, "p95_ms": 25.2, "max_ms": 25.2},
+    "generation": {"observed": 10, "retained": 10, "mean_ms": 0.005, "p50_ms": 0.003, "p95_ms": 0.014, "max_ms": 0.014},
+    "http.request": {"observed": 5, "retained": 5, "mean_ms": 14.1, "p50_ms": 11.8, "p95_ms": 30.4, "max_ms": 30.4},
+    "ingestion": {"observed": 10, "retained": 10, "mean_ms": 2.1, "p50_ms": 1.6, "p95_ms": 4.0, "max_ms": 4.0},
+    "query": {"observed": 12, "retained": 12, "mean_ms": 0.7, "p50_ms": 0.6, "p95_ms": 1.0, "max_ms": 1.0},
+    "retrieval": {"observed": 12, "retained": 12, "mean_ms": 0.6, "p50_ms": 0.5, "p95_ms": 0.9, "max_ms": 0.9}
+  }
+}
+```
+
+Four properties of these numbers matter when reading them:
+
+- **Counters are labelled by route template, not by path**, and without the API version
+  prefix — so `/api/v1/knowledge-bases/{id}/documents` appears as
+  `http.route./knowledge-bases/{knowledge_base_id}/documents`. A caller cannot invent metric
+  series by inventing identifiers, an unmatched request shares one `http.route.unmatched`
+  bucket, and changing `APP_API_V1_PREFIX` does not split every counter.
+- **A stage that never ran has no latency rather than a zero one.** `generation` has ten
+  samples here, not twelve: the two `insufficient_evidence` questions never reached the
+  generator. In a fresh process the latencies dictionary is empty, which is what "nothing has
+  happened yet" looks like.
+- **Percentiles are nearest-rank over a bounded window** of the last 1024 samples per metric.
+  `observed` is the total taken, `retained` is how many the summary was computed from, and
+  `window` is the cap. These are per process: nothing is aggregated across replicas and
+  nothing survives a restart, which is what the deployment's CloudWatch metrics are for.
+- **The request that reads the endpoint appears as a request but not yet as a response**,
+  because the response is recorded once it exists, after the snapshot was taken. This is
+  asserted in the suite rather than left to be discovered.
+
 Set `APP_LOG_FORMAT=json` (the default) so CloudWatch Logs can index these fields as
 structured data; `APP_LOG_FORMAT=console` renders the same records for local reading.
-Latency percentiles, retrieval metrics, token usage and failure counters are added in
-Phase 5 — no metric is reported before it is actually measured.
+Exporting these numbers to CloudWatch is Phase 7 work; until then they are a snapshot for an
+operator or a local run, and every metric that appears was measured by this process.
 
 ## Testing
 
@@ -721,7 +995,7 @@ cd backend
 python -m pytest -q
 ```
 
-194 deterministic tests, with no network, AWS credentials or container runtime:
+282 deterministic tests, with no network, AWS credentials or container runtime:
 
 - configuration defaults, environment overrides, and rejection of invalid ports, log
   formats, upload limits, chunk sizes, overlaps, vector widths, poll intervals, retrieval
@@ -762,7 +1036,31 @@ python -m pytest -q
 - the extractive adapter's markers, verbatim text and refusal to answer without passages;
 - the Bedrock adapter against a stubbed client: the prompt it builds, the limits it sends,
   the text and token usage it parses, joined content blocks, and every failure path,
-  including malformed and empty responses.
+  including malformed and empty responses;
+- nearest-rank percentiles, including that a reported percentile is always a value that was
+  measured, and that an empty sample is rejected rather than answered with zero;
+- the metrics registry: accumulation, weighted counters, bounded windows that keep the most
+  recent samples while still reporting the total observed, ordered snapshots, and concurrent
+  recording from four threads without losing an update;
+- the metrics endpoint: request and response counters, route-template labelling that never
+  contains an identifier, one bucket for unmatched requests, 5xx counted when a handler
+  raises, ingestion succeeded and failed counters, query outcome counters, and that a
+  question with no evidence records no `generation` latency at all;
+- retrieval metrics against hand-computed values: recall, precision divided by `k`, hit rate,
+  reciprocal rank, and nDCG with binary gains, repeats discounted once, an ideal ranking built
+  from every relevant chunk, and `k` truncation — plus that a metric with no relevant chunk
+  raises instead of returning zero;
+- the evaluation dataset rules: every rejection path (blank names, duplicates, empty content,
+  an unparsable document, an answerable question with no label, an unanswerable one with
+  labels, a label naming an undeclared document), with the offending document or question in
+  the error details;
+- the evaluation endpoint end to end: the committed sample dataset runs as written and reports
+  every metric within range, an answerable question that quotes the corpus is answered, an
+  unanswerable one reports `null` retrieval metrics instead of zeros, the temporary knowledge
+  base and its stored documents are gone afterwards, two runs of the same dataset score
+  identically, a label that matches no chunk becomes an issue rather than a miss, an
+  unparsable corpus is reported instead of raising, a stricter threshold buys abstention at
+  the measured cost of an answerable question, and the payload bounds are enforced.
 
 HTTP tests drive the real application through `TestClient` against a real SQLite database,
 so middleware, dependency injection, transactions and exception handlers are all
@@ -776,8 +1074,8 @@ exercised.
 | 2 | Knowledge base management, document upload, relational metadata, storage port and filesystem adapter | **complete** |
 | 3 | Ingestion: PDF/Markdown/TXT parsing, structure-preserving chunking, embeddings, vector index behind ports, ingestion worker | **complete** |
 | 4 | RAG query pipeline: retrieval, relevance threshold, reranking abstraction, context construction, grounded answers with citations, generation behind a port, per-stage trace | **complete** |
-| 5 | Observability (latency, retrieval and token metrics) and the evaluation module | next |
-| 6 | React + TypeScript UI: chat, knowledge bases, evaluation dashboard, system metrics | planned |
+| 5 | Observability (request, ingestion, query and token counters, latency percentiles) and the evaluation module (labelled datasets, standard retrieval metrics, a measured threshold trade-off) | **complete** |
+| 6 | React + TypeScript UI: chat, knowledge bases, evaluation dashboard, system metrics | next |
 | 7 | AWS adapters (S3, Bedrock, OpenSearch/pgvector, Cognito, Lambda + queue), Terraform, docker-compose | planned |
 | 8 | README and architecture documentation consolidation, roadmap and limitations | planned |
 
@@ -785,8 +1083,20 @@ exercised.
 
 Stated plainly so the repository is not mistaken for more than it is:
 
-- **No semantic embeddings.** The local adapter is lexical; see
-  [Retrieval and answer quality](#retrieval-and-answer-quality).
+- **No semantic embeddings, and no threshold that replaces them.** Measured, not assumed: on
+  the committed sample the unrelated question outscores a relevant one, so no `min_score`
+  separates them. See [Retrieval and answer quality](#retrieval-and-answer-quality).
+- **No faithfulness, groundedness or hallucination metric.** The evaluation scores retrieval
+  and whether the cited chunks are the labelled ones. Judging an answer's prose needs human or
+  model judgement, and no heuristic stands in for it here.
+- **No metric export and no history.** `GET /api/v1/metrics` is a per-process snapshot: no
+  Prometheus endpoint, no CloudWatch export, no persistence across restarts, no aggregation
+  across replicas. Logs are already structured for CloudWatch.
+- **No graded relevance and no multi-run comparison.** Labels are binary, and each run is
+  returned rather than stored, so comparing runs is something a caller does with the
+  responses.
+- **Evaluation is synchronous and bounded** (25 documents, 100 questions, 100 000 characters
+  per document). A real corpus needs a batch job with progress reporting.
 - **No verified Bedrock call.** The generator adapter exists, is selected by
   configuration and is unit-tested against a stubbed client, but no request in this
   repository has reached a real Bedrock endpoint.
@@ -802,8 +1112,6 @@ Stated plainly so the repository is not mistaken for more than it is:
 - **No token-accurate budgets.** Chunk windows and the context budget are measured in
   characters; the configured model's tokenizer is never consulted, so a context that fits
   the budget may still exceed a model's token limit.
-- **No evaluation or metrics endpoints.** `POST /api/v1/evaluations` and
-  `/api/v1/metrics` do not exist, and no quality metric is claimed.
 - **No document download.** Metadata and chunks can be read; the stored bytes cannot be
   fetched back over the API.
 - **No archive.** Documents are deleted, not archived; there is no retention or
@@ -837,6 +1145,15 @@ Stated plainly so the repository is not mistaken for more than it is:
 - A query sends the question and the retrieved passages to the configured generator, and
   nothing else: no other documents, no user identity, no conversation history. With the
   default local adapter nothing leaves the process at all, which is why it is the default.
+- An evaluation sends nothing anywhere either: it ingests the corpus into the local
+  knowledge base, queries it, removes it, and returns a report.
+- Nothing in a request body is trusted as a path: an evaluation controls only the *content*
+  and *names* of the documents it registers, and the storage key is still derived from the
+  generated identifiers.
+- The evaluation endpoint is unauthenticated like every other endpoint, and it is the most
+  expensive one: it ingests a corpus synchronously. Its payload is capped (25 documents, 100
+  questions, 100 000 characters per document) for that reason, and authentication and rate
+  limiting are Phase 7 work. Until then it should not be exposed to untrusted callers.
 - The Bedrock adapter uses the ambient AWS credential chain (environment, shared profile or
   instance role). No credential is read from configuration or written by the platform.
 - Prompts ask the model to answer only from the supplied passages, but that instruction is
@@ -902,6 +1219,27 @@ The AWS SDK is an optional extra so that the base install stays small:
 ```bash
 pip install -e "backend[aws]"
 ```
+
+**`422 INVALID_EVALUATION_DATASET`**
+
+The dataset contradicts itself: a label names a document the corpus does not contain, an
+answerable question labels nothing, an unanswerable one labels something, or two documents or
+questions share a name or id. `error.details` names the offending question or document. The
+request is rejected before any work happens, because scoring such a dataset would report a
+missing label as a retrieval failure.
+
+**An evaluation reports issues, or scores lower than expected**
+
+`issues` entries are dataset problems, not platform failures: a label snippet that matched no
+chunk, or a document that did not ingest (`broken.pdf: no text could be extracted`). Fix the
+dataset first — an unresolvable label leaves its question out of the aggregate rather than
+scoring zero.
+
+If the numbers themselves are surprising, read
+[Retrieval and answer quality](#retrieval-and-answer-quality) first: the local embedding model
+scores shared vocabulary, so an unrelated question can outscore a relevant one and no
+threshold separates them. Re-run with a different `min_score` to see the trade-off instead of
+guessing — the report says which threshold produced it.
 
 **Starting over locally**
 

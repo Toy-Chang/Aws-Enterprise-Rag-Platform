@@ -1,0 +1,89 @@
+{
+  "name": "platform-runbooks-smoke",
+  "k": 5,
+  "documents": [
+    {
+      "name": "incident-response.md",
+      "content": "# Incident response\n\n## Severity levels\n\nA sev-1 incident means customer-facing loss of service. A sev-2 incident means degraded service with a workaround. A sev-3 incident is anything else.\n\n## Acknowledgement\n\nA sev-1 incident must be acknowledged within fifteen minutes of the page. A sev-2 incident must be acknowledged within one hour. The on-call engineer acknowledges the page in the incident channel so that everyone can see who is responding.\n\n## Escalation\n\nIf the on-call engineer does not acknowledge the page, the secondary on-call engineer is paged after ten minutes. If the secondary does not respond either, the incident commander is paged after twenty minutes. Escalation does not replace acknowledgement: the person who takes the page still has to say so in the channel.\n\n## Communication\n\nWhile a sev-1 incident is open, the incident commander posts an update every thirty minutes. Customers are informed through the status page rather than through the incident channel.\n\n## Review\n\nEvery sev-1 incident requires a written review within five working days. The review records what failed, what was done to restore service, and which follow-up actions were created. The reliability lead tracks those actions until they are closed.\n"
+    },
+    {
+      "name": "encryption-policy.md",
+      "content": "# Encryption policy\n\n## Data at rest\n\nCustomer data is encrypted at rest with KMS customer managed keys. Keys are rotated annually, and a key is never shared between environments.\n\n## Credential rotation\n\nDatabase credentials rotate every ninety days through Secrets Manager. Application secrets rotate every one hundred and eighty days. Rotation is automatic and does not require a deployment.\n"
+    },
+    {
+      "name": "access-control.md",
+      "content": "# Access control\n\n## Least privilege\n\nAccess is granted to a role rather than to a person, and a role carries only the permissions its tasks need. Standing access to production is limited to the platform team.\n\n## Production access\n\nAccess to production data is approved by the service owner and expires after eight hours. Every session is logged.\n\n## Reviews\n\nRole assignments are reviewed every quarter. A reviewer confirms each assignment is still needed and removes the ones that are not.\n"
+    },
+    {
+      "name": "backup-restore.md",
+      "content": "# Backup and restore\n\n## Snapshots\n\nEvery database is snapshotted nightly. Snapshots are retained for thirty-five days, and the newest snapshot is copied to a second region every week.\n\n## Restores\n\nA restore drill runs once a quarter against a scratch database. The drill is not considered complete until an engineer has restored the data and queried it.\n"
+    },
+    {
+      "name": "change-management.md",
+      "content": "# Change management\n\n## Deployments\n\nA deployment needs a green build and one review. Deployments run during business hours unless an incident requires otherwise.\n\n## Rollback\n\nEvery deployment is rollback-safe: the previous version stays available until the new one has served traffic for an hour. A rollback is a decision, not an escalation, and the engineer who deployed may perform it.\n"
+    }
+  ],
+  "questions": [
+    {
+      "id": "credential-rotation",
+      "question": "How often do database credentials rotate?",
+      "answerable": true,
+      "relevant": [
+        {
+          "document": "encryption-policy.md",
+          "contains": "Database credentials rotate every ninety days"
+        }
+      ]
+    },
+    {
+      "id": "encryption-at-rest",
+      "question": "How is customer data encrypted at rest?",
+      "answerable": true,
+      "relevant": [
+        {
+          "document": "encryption-policy.md",
+          "contains": "encrypted at rest with KMS customer managed keys"
+        }
+      ]
+    },
+    {
+      "id": "sev1-acknowledgement",
+      "question": "How quickly must a sev-1 incident be acknowledged?",
+      "answerable": true,
+      "relevant": [
+        {
+          "document": "incident-response.md",
+          "contains": "acknowledged within fifteen minutes of the page"
+        }
+      ]
+    },
+    {
+      "id": "snapshot-retention",
+      "question": "How long are nightly database snapshots retained?",
+      "answerable": true,
+      "relevant": [
+        {
+          "document": "backup-restore.md",
+          "contains": "retained for thirty-five days"
+        }
+      ]
+    },
+    {
+      "id": "production-access-approval",
+      "question": "Who approves access to production data?",
+      "answerable": true,
+      "relevant": [
+        {
+          "document": "access-control.md",
+          "contains": "approved by the service owner"
+        }
+      ]
+    },
+    {
+      "id": "holiday-schedule",
+      "question": "What is the company holiday schedule for next year?",
+      "answerable": false,
+      "relevant": []
+    }
+  ]
+}

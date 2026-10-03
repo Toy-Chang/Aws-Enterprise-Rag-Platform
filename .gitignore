@@ -32,6 +32,9 @@ data/
 # --- Node / frontend ---
 node_modules/
 *.local
+# Vite's cache and a Vitest coverage report.
+.vite/
+coverage/
 
 # --- Terraform ---
 .terraform/

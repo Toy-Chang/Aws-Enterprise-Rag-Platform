@@ -14,6 +14,7 @@ from app.api.routes import health, meta
 from app.core.config import Settings, get_settings
 from app.core.db import create_db_engine, create_session_factory, init_db
 from app.core.logging import configure_logging, get_logger
+from app.core.metrics import MetricsRegistry
 from app.rag import (
     AnswerModel,
     BedrockAnswerModel,
@@ -100,6 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved
     app.state.engine = create_db_engine(resolved)
     app.state.session_factory = create_session_factory(app.state.engine)
+    app.state.metrics = MetricsRegistry()
     app.state.storage = LocalFileSystemStorage(resolved.storage_dir)
     app.state.embedder = HashingEmbeddingModel(resolved.embedding_dimensions)
     app.state.vector_store = InMemoryVectorStore(resolved.embedding_dimensions)
@@ -109,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         embedder=app.state.embedder,
         vector_store=app.state.vector_store,
         settings=resolved,
+        metrics=app.state.metrics,
     )
     app.state.ingestion_worker = IngestionWorker(
         app.state.ingestion, poll_seconds=resolved.ingestion_poll_seconds
@@ -118,7 +121,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.reranker = LexicalOverlapReranker() if resolved.rerank_enabled else None
     app.state.answer_model = _build_answer_model(resolved)
 
-    app.add_middleware(RequestContextMiddleware, header_name=resolved.request_id_header)
+    app.add_middleware(
+        RequestContextMiddleware,
+        header_name=resolved.request_id_header,
+        metrics=app.state.metrics,
+    )
     register_exception_handlers(app)
 
     app.include_router(meta.router)

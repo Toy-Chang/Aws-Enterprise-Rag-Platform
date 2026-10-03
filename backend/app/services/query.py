@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.metrics import MetricsRegistry
 from app.core.timing import elapsed_ms
 from app.rag import (
     AnswerModel,
@@ -113,6 +114,7 @@ class QueryService:
         reranker: Reranker | None,
         answer_model: AnswerModel,
         settings: Settings,
+        metrics: MetricsRegistry,
     ) -> None:
         self._retrieval = RetrievalService(
             session=session,
@@ -122,6 +124,7 @@ class QueryService:
             settings=settings,
         )
         self._answer_model = answer_model
+        self._metrics = metrics
         self._context_max_chars = settings.context_max_chars
 
     def answer(
@@ -156,18 +159,20 @@ class QueryService:
                 above_threshold=retrieval.above_threshold,
                 min_score=retrieval.min_score,
             )
-            return QueryResult(
-                question=question,
-                knowledge_base_id=knowledge_base_id,
-                outcome=QueryOutcome.INSUFFICIENT_EVIDENCE,
-                answer=None,
-                answer_kind=None,
-                citations=(),
-                usage=Usage(input_tokens=None, output_tokens=None),
-                retrieval=retrieval,
-                context=context,
-                generation=None,
-                total_duration_ms=elapsed_ms(started),
+            return self._finish(
+                QueryResult(
+                    question=question,
+                    knowledge_base_id=knowledge_base_id,
+                    outcome=QueryOutcome.INSUFFICIENT_EVIDENCE,
+                    answer=None,
+                    answer_kind=None,
+                    citations=(),
+                    usage=Usage(input_tokens=None, output_tokens=None),
+                    retrieval=retrieval,
+                    context=context,
+                    generation=None,
+                    total_duration_ms=elapsed_ms(started),
+                )
             )
 
         generation_started = time.perf_counter()
@@ -206,6 +211,33 @@ class QueryService:
             generation_ms=generation.duration_ms,
             total_ms=result.total_duration_ms,
         )
+        return self._finish(result)
+
+    def _finish(self, result: QueryResult) -> QueryResult:
+        """Record the stages of one query and return it.
+
+        The stage durations are the ones already measured for the trace, so the
+        metrics and the response cannot report different numbers for the same call.
+        Token counts are recorded only when the generator reports them: counting a
+        missing usage report as zero would understate what the model actually did.
+        """
+        self._metrics.observe("retrieval", result.retrieval.duration_ms)
+        self._metrics.observe("query", result.total_duration_ms)
+        self._metrics.increment("retrieval.candidates.total", result.retrieval.candidates)
+        self._metrics.increment("retrieval.selected.total", len(result.retrieval.passages))
+
+        if result.outcome is QueryOutcome.ANSWERED:
+            self._metrics.increment("query.answered")
+        else:
+            self._metrics.increment("query.insufficient_evidence")
+
+        if result.generation is not None:
+            self._metrics.observe("generation", result.generation.duration_ms)
+        if result.usage.input_tokens is not None:
+            self._metrics.increment("generation.input_tokens.total", result.usage.input_tokens)
+        if result.usage.output_tokens is not None:
+            self._metrics.increment("generation.output_tokens.total", result.usage.output_tokens)
+
         return result
 
 

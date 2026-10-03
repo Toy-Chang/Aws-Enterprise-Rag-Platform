@@ -81,3 +81,17 @@ class GenerationFailedError(AppError):
     status_code = 502
     code = "GENERATION_FAILED"
     message = "The answer could not be generated."
+
+
+class InvalidEvaluationDatasetError(AppError):
+    """The evaluation dataset could not be scored as written.
+
+    Raised before any work happens, because a dataset that references an undeclared
+    document or marks a question answerable without saying what answers it cannot
+    produce an honest number. Scoring it as zero would turn a broken label into a
+    quality claim.
+    """
+
+    status_code = 422
+    code = "INVALID_EVALUATION_DATASET"
+    message = "The evaluation dataset is not usable."

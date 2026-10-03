@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.routes import documents, knowledge_bases, query
+from app.api.routes import documents, evaluations, knowledge_bases, metrics, query
 
 api_router = APIRouter()
 api_router.include_router(knowledge_bases.router)
 api_router.include_router(documents.router)
 api_router.include_router(query.router)
+api_router.include_router(evaluations.router)
+api_router.include_router(metrics.router)

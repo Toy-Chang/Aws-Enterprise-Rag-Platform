@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from app.api.deps import (
     AnswerModelDep,
     EmbedderDep,
+    MetricsDep,
     RerankerDep,
     SessionDep,
     SettingsDep,
@@ -32,6 +33,7 @@ def query_knowledge_base(
     vector_store: VectorStoreDep,
     reranker: RerankerDep,
     answer_model: AnswerModelDep,
+    metrics: MetricsDep,
 ) -> QueryResponse:
     """Answer a question from one knowledge base, with the evidence it used.
 
@@ -50,6 +52,7 @@ def query_knowledge_base(
         reranker=reranker,
         answer_model=answer_model,
         settings=settings,
+        metrics=metrics,
     ).answer(
         knowledge_base_id,
         payload.question,
