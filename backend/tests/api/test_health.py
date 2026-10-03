@@ -27,13 +27,14 @@ def test_liveness_reports_ok(client: TestClient) -> None:
     assert body["environment"] == "test"
 
 
-def test_readiness_reports_ok_without_wired_dependencies(client: TestClient) -> None:
+def test_readiness_reports_the_database_check(client: TestClient) -> None:
     response = client.get("/health/ready")
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["checks"] == []
+    assert [check["name"] for check in body["checks"]] == ["database"]
+    assert body["checks"][0]["status"] == "ok"
 
 
 def test_response_reuses_inbound_request_id(client: TestClient) -> None:

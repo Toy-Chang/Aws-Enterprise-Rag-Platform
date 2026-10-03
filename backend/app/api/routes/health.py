@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
+from sqlalchemy import Engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
-from app.api.deps import get_app_settings
-from app.core.config import Settings
-from app.schemas.common import LivenessResponse, ReadinessResponse
+from app.api.deps import EngineDep, SettingsDep
+from app.schemas.common import HealthCheck, LivenessResponse, ReadinessResponse
 
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health", response_model=LivenessResponse, summary="Liveness probe")
-async def liveness(
-    settings: Annotated[Settings, Depends(get_app_settings)],
-) -> LivenessResponse:
+def liveness(settings: SettingsDep) -> LivenessResponse:
     """Report that the process is running and able to serve requests."""
     return LivenessResponse(
         service=settings.name,
@@ -26,19 +25,33 @@ async def liveness(
 
 
 @router.get("/health/ready", response_model=ReadinessResponse, summary="Readiness probe")
-async def readiness(
-    settings: Annotated[Settings, Depends(get_app_settings)],
-) -> ReadinessResponse:
+def readiness(settings: SettingsDep, engine: EngineDep) -> ReadinessResponse:
     """Report whether the service is ready to accept traffic.
 
-    No external dependency (object storage, vector index, model provider) is wired
-    in at this stage, so the check list is empty. Each adapter added in a later
-    phase contributes its own check here, which keeps the probe contract stable.
+    Every external dependency contributes one check. The document store is not
+    probed here yet because its adapter is a local directory in this phase; a check
+    becomes meaningful once the AWS implementation replaces it.
     """
+    checks = [_check_database(engine)]
+    status: Literal["ok", "degraded"] = (
+        "ok" if all(check.status == "ok" for check in checks) else "degraded"
+    )
     return ReadinessResponse(
-        status="ok",
+        status=status,
         service=settings.name,
         version=settings.version,
         environment=settings.environment,
-        checks=[],
+        checks=checks,
     )
+
+
+def _check_database(engine: Engine) -> HealthCheck:
+    """Confirm the database answers a trivial query."""
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        # Only the exception type is reported: a driver message can contain the
+        # connection string, and a probe response is visible to callers.
+        return HealthCheck(name="database", status="degraded", detail=type(exc).__name__)
+    return HealthCheck(name="database", status="ok")
