@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.adapters import build_embedder, build_storage, build_vector_store
 from app.api.errors import register_exception_handlers
 from app.api.middleware import RequestContextMiddleware
 from app.api.router import api_router
@@ -19,11 +20,8 @@ from app.rag import (
     AnswerModel,
     BedrockAnswerModel,
     ExtractiveAnswerModel,
-    HashingEmbeddingModel,
-    InMemoryVectorStore,
     LexicalOverlapReranker,
 )
-from app.repositories.local_fs_storage import LocalFileSystemStorage
 from app.services.ingestion import IngestionService, rebuild_vector_index
 from app.services.worker import IngestionWorker
 
@@ -95,16 +93,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Resources live on app.state, so a dependency hands them to a request without
-    # any module-level singletons. The retrieval and storage adapters are the local
-    # ones; the AWS implementations are swapped in here and nowhere else.
+    # Resources live on app.state, so a dependency hands them to a request without any
+    # module-level singletons. Which implementation of the storage, embedding and vector
+    # ports is used is decided by configuration in one place, and nowhere else: no
+    # service knows whether it is running against the local adapters or the AWS ones.
     app.state.settings = resolved
     app.state.engine = create_db_engine(resolved)
     app.state.session_factory = create_session_factory(app.state.engine)
     app.state.metrics = MetricsRegistry()
-    app.state.storage = LocalFileSystemStorage(resolved.storage_dir)
-    app.state.embedder = HashingEmbeddingModel(resolved.embedding_dimensions)
-    app.state.vector_store = InMemoryVectorStore(resolved.embedding_dimensions)
+    app.state.storage = build_storage(resolved)
+    app.state.embedder = build_embedder(resolved)
+    app.state.vector_store = build_vector_store(resolved)
     app.state.ingestion = IngestionService(
         session_factory=app.state.session_factory,
         storage=app.state.storage,

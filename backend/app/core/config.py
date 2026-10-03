@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "test", "development", "staging", "production"]
@@ -88,11 +88,72 @@ class Settings(BaseSettings):
     log_level: LogLevel = "INFO"
     log_format: LogFormat = "json"
 
+    # AWS adapters. Each concern is selected independently, so a deployment can move one
+    # at a time -- documents to S3 while embeddings stay local -- and the local stack
+    # keeps needing no AWS credentials at all. A selection that is missing something it
+    # needs is refused while the process starts, not at the first upload or question.
+    storage_backend: Literal["local", "s3"] = "local"
+    s3_bucket: str | None = None
+    s3_prefix: str = "documents"
+    s3_region: str = "us-east-1"
+
+    # Embeddings share ``bedrock_region`` with generation: both talk to Bedrock.
+    embedding_provider: Literal["local", "bedrock"] = "local"
+    bedrock_embedding_model_id: str = "amazon.titan-embed-text-v2:0"
+
+    vector_store_backend: Literal["memory", "opensearch"] = "memory"
+    opensearch_endpoint: str | None = None
+    opensearch_region: str = "us-east-1"
+    opensearch_index: str = "rag-chunks"
+    # With both of these set, requests carry basic authentication; with neither, they are
+    # signed with SigV4 and the AWS SDK has to find credentials.
+    opensearch_username: str | None = None
+    opensearch_password: SecretStr | None = None
+    opensearch_verify_certs: bool = True
+    # A Serverless collection does not offer the nmslib engine and is signed with a
+    # different service name, so the deployment has to say which kind it is.
+    opensearch_serverless: bool = False
+
+    @property
+    def opensearch_basic_auth(self) -> tuple[str, str] | None:
+        """The basic-auth pair, or ``None`` when requests should be signed with SigV4."""
+        if not self.opensearch_username or self.opensearch_password is None:
+            return None
+        password = self.opensearch_password.get_secret_value().strip()
+        if not password:
+            return None
+        return self.opensearch_username, password
+
     @model_validator(mode="after")
     def _check_chunk_overlap(self) -> Settings:
         """Reject an overlap that would stop chunking from making progress."""
         if self.chunk_overlap_chars >= self.chunk_size_chars:
             raise ValueError("chunk_overlap_chars must be smaller than chunk_size_chars")
+        return self
+
+    @model_validator(mode="after")
+    def _check_aws_adapters(self) -> Settings:
+        """Reject a backend selection that does not carry what it needs to start."""
+        if self.storage_backend == "s3" and not (self.s3_bucket or "").strip():
+            raise ValueError("s3_bucket is required when storage_backend is 's3'")
+
+        if self.vector_store_backend == "opensearch":
+            if not (self.opensearch_endpoint or "").strip():
+                raise ValueError(
+                    "opensearch_endpoint is required when vector_store_backend is 'opensearch'"
+                )
+            # A blank value is the same as an absent one: half a basic-auth pair would
+            # otherwise look like a configuration and silently fall back to SigV4.
+            self.opensearch_username = (self.opensearch_username or "").strip() or None
+            if self.opensearch_password is not None and not (
+                self.opensearch_password.get_secret_value().strip()
+            ):
+                self.opensearch_password = None
+            if (self.opensearch_username is None) != (self.opensearch_password is None):
+                raise ValueError(
+                    "opensearch_username and opensearch_password have to be set together: "
+                    "with neither of them, requests are signed with SigV4"
+                )
         return self
 
 

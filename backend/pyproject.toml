@@ -19,16 +19,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The AWS SDK is only needed by the AWS adapters. Keeping it out of the base install is
-# what lets the platform run locally without it.
+# The AWS SDK and the OpenSearch client are only needed by the AWS adapters. Keeping them
+# out of the base install is what lets the platform run locally without either.
 aws = [
   "boto3>=1.35,<2.0",
+  "opensearch-py>=2.7,<3.0",
 ]
 dev = [
   "pytest>=8.3,<9.0",
   "httpx2>=2.13,<3.0",
   "ruff>=0.7,<1.0",
   "boto3>=1.35,<2.0",
+  "opensearch-py>=2.7,<3.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -6,6 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from app.core.errors import AppError
+
 
 @dataclass(frozen=True)
 class VectorRecord:
@@ -53,3 +55,16 @@ class VectorStore(Protocol):
     def count(self) -> int:
         """Return how many vectors are indexed."""
         ...
+
+
+class VectorStoreError(AppError):
+    """The vector index could not be read or written.
+
+    Declared beside the port for the same reason as :class:`EmbeddingFailedError`. A
+    store that cannot be reached is an upstream failure of answering a question, so it
+    maps onto the API contract as a bad gateway rather than as a crash of this service.
+    """
+
+    status_code = 502
+    code = "VECTOR_STORE_ERROR"
+    message = "The vector index could not be reached."

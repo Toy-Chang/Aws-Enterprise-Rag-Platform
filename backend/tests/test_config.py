@@ -152,3 +152,104 @@ def test_the_generation_provider_can_be_switched_to_bedrock(
 
     assert settings.generation_provider == "bedrock"
     assert settings.bedrock_model_id == "amazon.nova-pro-v1:0"
+
+
+def test_aws_adapter_defaults_keep_the_platform_local() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.storage_backend == "local"
+    assert settings.s3_bucket is None
+    assert settings.s3_prefix == "documents"
+    assert settings.s3_region == "us-east-1"
+    assert settings.embedding_provider == "local"
+    assert settings.bedrock_embedding_model_id == "amazon.titan-embed-text-v2:0"
+    assert settings.vector_store_backend == "memory"
+    assert settings.opensearch_endpoint is None
+    assert settings.opensearch_region == "us-east-1"
+    assert settings.opensearch_index == "rag-chunks"
+    assert settings.opensearch_username is None
+    assert settings.opensearch_password is None
+    assert settings.opensearch_verify_certs is True
+    assert settings.opensearch_serverless is False
+    assert settings.opensearch_basic_auth is None
+
+
+@pytest.mark.parametrize("bucket", ["", "   "])
+def test_s3_without_a_bucket_is_rejected(bucket: str) -> None:
+    with pytest.raises(ValidationError, match="s3_bucket is required"):
+        Settings(_env_file=None, storage_backend="s3", s3_bucket=bucket)
+
+
+def test_opensearch_without_an_endpoint_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="opensearch_endpoint is required"):
+        Settings(_env_file=None, vector_store_backend="opensearch")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"opensearch_username": "platform"},
+        {"opensearch_password": "secret"},
+    ],
+)
+def test_half_a_basic_auth_pair_is_rejected(overrides: dict[str, str]) -> None:
+    # Half a pair would look like a configuration and silently fall back to SigV4.
+    with pytest.raises(ValidationError, match="have to be set together"):
+        Settings(
+            _env_file=None,
+            vector_store_backend="opensearch",
+            opensearch_endpoint="https://search.example.com",
+            **overrides,
+        )
+
+
+def test_a_complete_basic_auth_pair_is_exposed_as_a_tuple() -> None:
+    settings = Settings(
+        _env_file=None,
+        vector_store_backend="opensearch",
+        opensearch_endpoint="https://search.example.com",
+        opensearch_username="platform",
+        opensearch_password="secret",
+    )
+
+    assert settings.opensearch_basic_auth == ("platform", "secret")
+
+
+def test_blank_basic_auth_values_are_treated_as_absent() -> None:
+    settings = Settings(
+        _env_file=None,
+        vector_store_backend="opensearch",
+        opensearch_endpoint="https://search.example.com",
+        opensearch_username="  ",
+        opensearch_password="  ",
+    )
+
+    assert settings.opensearch_username is None
+    assert settings.opensearch_password is None
+    assert settings.opensearch_basic_auth is None
+
+
+def test_the_opensearch_password_is_not_readable_from_a_representation() -> None:
+    settings = Settings(
+        _env_file=None,
+        vector_store_backend="opensearch",
+        opensearch_endpoint="https://search.example.com",
+        opensearch_username="platform",
+        opensearch_password="hunter2",
+    )
+
+    assert "hunter2" not in repr(settings)
+    assert "hunter2" not in str(settings)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("storage_backend", "gcs"),
+        ("embedding_provider", "openai"),
+        ("vector_store_backend", "pinecone"),
+    ],
+)
+def test_an_unknown_adapter_is_rejected(field: str, value: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})
