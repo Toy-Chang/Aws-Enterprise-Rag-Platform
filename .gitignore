@@ -21,6 +21,14 @@ dist/
 *.pem
 *.key
 
+# --- Local application data ---
+# SQLite database and stored documents written by the local adapters.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
 # --- Node / frontend ---
 node_modules/
 *.local
