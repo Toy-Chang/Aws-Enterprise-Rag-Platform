@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import math
-import re
 from collections import Counter
 from collections.abc import Sequence
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+from app.rag.text import terms
 
 
 def _bucket(token: str, dimensions: int) -> int:
@@ -53,7 +52,7 @@ class HashingEmbeddingModel:
         return self._embed(text)
 
     def _embed(self, text: str) -> list[float]:
-        counts = Counter(_TOKEN.findall(text.lower()))
+        counts = Counter(terms(text))
         vector = [0.0] * self._dimensions
         for token, count in counts.items():
             # Sublinear weighting stops a term repeated many times from dominating the
