@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
@@ -23,17 +24,22 @@ def create_db_engine(settings: Settings) -> Engine:
 
     engine = create_engine(url, connect_args=connect_args, future=True)
     if is_sqlite:
-        _enable_sqlite_foreign_keys(engine)
+        _configure_sqlite(engine)
     return engine
 
 
-def _enable_sqlite_foreign_keys(engine: Engine) -> None:
-    """Turn on foreign key enforcement, which SQLite leaves disabled by default."""
+def _configure_sqlite(engine: Engine) -> None:
+    """Apply the per-connection settings SQLite needs to behave predictably."""
 
     @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_connection: object, _connection_record: object) -> None:
+    def _set_sqlite_pragmas(dbapi_connection: object, _connection_record: object) -> None:
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+        # Foreign keys are off by default in SQLite.
         cursor.execute("PRAGMA foreign_keys=ON")
+        # The default rollback journal blocks readers while a write is in flight. WAL
+        # lets the ingestion worker read while a request writes, which matters because
+        # both run in this process. SQLite still allows only one writer at a time.
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 
 
@@ -51,8 +57,13 @@ def init_db(engine: Engine) -> None:
     Base.metadata.create_all(bind=engine)
 
 
+@contextmanager
 def session_scope(session_factory: sessionmaker[Session]) -> Iterator[Session]:
-    """Yield a session, committing on success and rolling back on failure."""
+    """Open a session, committing on success and rolling back on failure.
+
+    Used both by the request dependency and by background work, so that a unit of
+    work has the same boundaries wherever it runs.
+    """
     session = session_factory()
     try:
         yield session
