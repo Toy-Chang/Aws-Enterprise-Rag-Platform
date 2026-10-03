@@ -9,9 +9,20 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from app.core.errors import AppError
 
-class DocumentStorageError(Exception):
-    """Raised when a storage backend cannot complete an operation."""
+
+class DocumentStorageError(AppError):
+    """Raised when a storage backend cannot complete an operation.
+
+    Declared beside the port it belongs to, like the embedding and vector store errors,
+    and it carries a status: a backend that cannot be reached or refuses a call is a bad
+    gateway rather than a defect in this service.
+    """
+
+    status_code = 502
+    code = "STORAGE_ERROR"
+    message = "The document could not be stored or read."
 
 
 @runtime_checkable

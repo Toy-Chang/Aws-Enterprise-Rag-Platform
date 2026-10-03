@@ -110,6 +110,9 @@ def test_a_client_failure_becomes_a_storage_error(operation: str) -> None:
 
     # The SDK's own failure stays attached for the log rather than being flattened.
     assert isinstance(caught.value.__cause__, RuntimeError)
+    # A bucket that refuses a call is an upstream fault, not a defect in this service.
+    assert caught.value.status_code == 502
+    assert caught.value.code == "STORAGE_ERROR"
 
 
 @pytest.mark.parametrize(

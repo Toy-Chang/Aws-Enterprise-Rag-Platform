@@ -140,7 +140,7 @@ crash:
 | The index cannot be reached or read | `502 VECTOR_STORE_ERROR` |
 | The embedding model cannot be reached | `502 EMBEDDING_FAILED` |
 | The answer model cannot be reached | `502 GENERATION_FAILED` |
-| An uploaded document cannot be stored | the document fails, or the upload is rejected |
+| The bucket refuses a call or the object is missing | `502 STORAGE_ERROR` on upload, or the document `failed` during ingestion |
 
 ## What is not here yet
 
@@ -164,8 +164,8 @@ Verified by `pytest` against injected stub clients (which is what pins the reque
 response mapping):
 
 - the S3 request carries the bucket, the prefixed key and the body; a missing object, a
-  denied call and a network failure all become a storage error; the keys the filesystem
-  adapter refuses are refused here too;
+  denied call and a network failure all become a `502 STORAGE_ERROR`; the keys the
+  filesystem adapter refuses are refused here too;
 - the Bedrock request carries `inputText`, `dimensions` and `normalize`; a response of
   the wrong length, a non-finite value, a malformed payload and an empty text are all
   refused with `EMBEDDING_FAILED`; an empty batch makes no request;

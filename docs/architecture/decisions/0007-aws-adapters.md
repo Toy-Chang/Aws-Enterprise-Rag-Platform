@@ -127,6 +127,12 @@ to, the way `DocumentStorageError` is declared beside the storage port, and they
 `AppError` subclasses with status 502. An upstream failure is a bad gateway, not an
 internal fault of this service, and the distinction is visible in the API contract.
 
+`DocumentStorageError` predated this phase as a bare `Exception`, which meant a bucket
+that refused a call reached the caller as `500 INTERNAL_ERROR`. It was brought into line
+with the other two, so all three adapters report an unreachable upstream the same way.
+This is a small, deliberate change to a committed file: an operator reading a 500 should
+be able to trust that something in *this* service is wrong.
+
 This was verified against a real HTTP request: with the vector store pointed at a closed
 port, a query answers `502` with code `VECTOR_STORE_ERROR`, and ingestion records the
 document as `failed` with the reason attached rather than crashing the worker.

@@ -57,3 +57,16 @@ def test_constructing_the_adapter_does_not_touch_disk(tmp_path: Path) -> None:
     LocalFileSystemStorage(root)
 
     assert not root.exists()
+
+
+def test_a_storage_failure_is_reported_as_a_bad_gateway(tmp_path: Path) -> None:
+    # The port's failure is a deliberate application error rather than a bare exception,
+    # so a caller can tell "the storage backend will not give me this" from "this service
+    # is broken".
+    storage = LocalFileSystemStorage(tmp_path)
+
+    with pytest.raises(DocumentStorageError) as caught:
+        storage.read("does-not-exist")
+
+    assert caught.value.status_code == 502
+    assert caught.value.code == "STORAGE_ERROR"
