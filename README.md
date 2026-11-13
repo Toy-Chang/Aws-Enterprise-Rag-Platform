@@ -597,7 +597,7 @@ terraform fmt -check -recursive
 | --- | --- | --- |
 | 后端测试 | **547 passed** | 已运行（2026-11-12，本机，Python 3.12，SQLite；AWS 部分为桩客户端） |
 | Ruff | `check` 通过，`format --check` 133 个文件无需改动 | 已运行（同日） |
-| 前端测试 | 95 个用例 | 项目记录；`frontend/src` 中 `it(` / `test(` 静态计数为 95 |
+| 前端测试 | **95 passed** | 已运行（本机） |
 | `tsc` / 前端构建 | 通过 | 项目记录 |
 | Terraform `validate` / `fmt -check` | 通过 | 项目记录 |
 | `docker compose config` | 通过 | 项目记录 |
